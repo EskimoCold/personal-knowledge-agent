@@ -1,6 +1,9 @@
 import json
+import os
 import unittest
 from asyncio import CancelledError
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, Mock, patch
 
 import asyncpg
@@ -24,6 +27,11 @@ def message_update(
 
 
 class BotTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        directory = self.enterContext(TemporaryDirectory())
+        self.heartbeat = Path(directory) / "heartbeat"
+        self.enterContext(patch.object(telegram, "HEARTBEAT", self.heartbeat))
+
     async def test_ignores_unapproved_senders_and_group_chats(self):
         db = Mock(enqueue=AsyncMock())
         with patch.object(telegram, "telegram_request") as request:
@@ -39,6 +47,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
     async def test_requires_explicit_allowlist_before_opening_client(self):
         for value in ("", "-42", "invalid"):
             with self.subTest(value=value):
+                self.heartbeat.touch()
                 with patch.dict(
                     "os.environ",
                     {"TELEGRAM_BOT_TOKEN": "test", "TELEGRAM_ALLOWED_USER_IDS": value},
@@ -49,6 +58,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
                     ):
                         with self.assertRaises(SystemExit):
                             await telegram.main()
+                        self.assertFalse(self.heartbeat.exists())
                         client.assert_not_called()
                         open_postgres.assert_not_called()
 
@@ -125,3 +135,56 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private note", str(error.exception))
         self.assertTrue(error.exception.__suppress_context__)
         request.assert_awaited_once()
+        self.assertFalse(self.heartbeat.exists())
+
+    async def test_health_tracks_capture_and_recovers_after_poll_failure(self):
+        def check_health():
+            with patch("builtins.print"):
+                return telegram.healthcheck()
+
+        self.assertEqual(check_health(), 1)
+
+        calls = 0
+
+        def respond(request):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(200, json={"ok": True, "result": []})
+            if calls == 2:
+                self.assertEqual(check_health(), 0)
+                os.utime(self.heartbeat, (0, 0))
+                return httpx.Response(503)
+            if calls == 3:
+                self.assertEqual(check_health(), 1)
+                return httpx.Response(200, json={"ok": True, "result": []})
+            self.assertEqual(check_health(), 0)
+            raise CancelledError
+
+        async with httpx.AsyncClient(
+            base_url="https://telegram.test", transport=httpx.MockTransport(respond)
+        ) as client:
+            with (
+                patch.object(telegram, "sleep"),
+                self.assertLogs(telegram.logger, "WARNING"),
+                self.assertRaises(CancelledError),
+            ):
+                await telegram.poll(client, Mock(), {42})
+
+    async def test_poll_reports_invalid_token_and_delivery_conflict(self):
+        for status, reason in [(401, "bot token"), (404, "bot token"), (409, "webhook")]:
+            with self.subTest(status=status):
+                transport = httpx.MockTransport(
+                    lambda request: httpx.Response(status, text="private response")
+                )
+                async with httpx.AsyncClient(
+                    base_url="https://telegram.test/botSECRET/", transport=transport
+                ) as client:
+                    with (
+                        patch.object(telegram, "sleep", side_effect=CancelledError),
+                        self.assertRaisesRegex(RuntimeError, reason) as error,
+                    ):
+                        await telegram.poll(client, Mock(), {42})
+                self.assertNotIn("SECRET", str(error.exception))
+                self.assertNotIn("private response", str(error.exception))
+                self.assertFalse(self.heartbeat.exists())

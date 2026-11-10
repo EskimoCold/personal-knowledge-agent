@@ -52,7 +52,7 @@ class Postgres:
             FROM notes
             WHERE owner_id = $1
               AND ($2 = '' OR (
-                  status = 'ready' AND strpos(
+                  (status = 'ready' OR kind = 'url') AND strpos(
                       lower(concat_ws(' ', value, text, summary, array_to_string(tags, ' '))),
                       lower($2)
                   ) > 0

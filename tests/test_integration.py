@@ -107,6 +107,18 @@ class PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertIn("failed", client.get(paths[2], auth=owner).text)
 
+    async def test_failed_and_pending_links_are_searchable_only_by_the_owner(self):
+        db = await self.start_database()
+        failed = await db.enqueue("1", NoteInput.from_text("https://example.org/report"))
+        self.assertTrue(await run_once(db))
+        self.assertEqual((await db.get_note("1", failed)).status, "failed")
+        pending = await db.enqueue("1", NoteInput.from_text("https://example.org/draft"))
+        await db.enqueue("1", NoteInput.from_text("Text note about example.org"))
+
+        matches = await db.list_notes("1", "EXAMPLE.ORG")
+        self.assertEqual([note.id for note in matches], [pending, failed])
+        self.assertEqual(await db.list_notes("2", "example.org"), [])
+
     async def test_deduplication_and_recovery_from_an_expired_claim(self):
         db = await self.start_database()
         note = NoteInput.from_text("Original note")

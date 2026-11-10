@@ -67,6 +67,12 @@ services:
       <<: *database-env
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_ALLOWED_USER_IDS: ${TELEGRAM_ALLOWED_USER_IDS:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "from app.intake.telegram import healthcheck; raise SystemExit(healthcheck())"]
+      interval: 15s
+      timeout: 5s
+      start_period: 45s
+      retries: 1
 
 volumes:
   postgres-data:
