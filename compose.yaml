@@ -1,0 +1,72 @@
+x-app-image: &app-image
+  build: .
+  image: personal-knowledge-agent:local
+
+x-app: &app
+  <<: *app-image
+  depends_on:
+    db:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
+  restart: unless-stopped
+
+x-database-env: &database-env
+  DATABASE_URL: postgresql://pka:pka@db/pka
+
+x-embeddings-env: &embeddings-env
+  EMBEDDINGS_URL: ${EMBEDDINGS_URL:-}
+  EMBEDDINGS_MODEL: ${EMBEDDINGS_MODEL:-}
+  EMBEDDINGS_DIMENSIONS: ${EMBEDDINGS_DIMENSIONS:-}
+  EMBEDDINGS_API_KEY: ${EMBEDDINGS_API_KEY:-}
+
+services:
+  db:
+    image: pgvector/pgvector:0.8.7-pg17-trixie
+    environment:
+      POSTGRES_USER: pka
+      POSTGRES_PASSWORD: pka
+      POSTGRES_DB: pka
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "pka", "-d", "pka"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    <<: *app-image
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+    environment: *database-env
+
+  web:
+    <<: *app
+    command: ["uvicorn", "app.intake.web:app", "--host", "0.0.0.0", "--no-access-log"]
+    environment:
+      <<: [*database-env, *embeddings-env]
+      PKA_WEB_USERS: ${PKA_WEB_USERS:?Copy .env.example to .env and set PKA_WEB_USERS}
+    ports:
+      - "127.0.0.1:${PKA_WEB_PORT:-8000}:8000"
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "app.processing.worker"]
+    environment:
+      <<: [*database-env, *embeddings-env]
+
+  bot:
+    <<: *app
+    profiles: [telegram]
+    command: ["python", "-m", "app.intake.telegram"]
+    environment:
+      <<: *database-env
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ALLOWED_USER_IDS: ${TELEGRAM_ALLOWED_USER_IDS:-}
+
+volumes:
+  postgres-data:

@@ -1,0 +1,12 @@
+[project]
+name = "personal-knowledge-agent"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.16,<2",
+    "asyncpg>=0.31,<1",
+    "fastapi>=0.115,<1",
+    "httpx>=0.28,<1",
+    "sqlalchemy[asyncio]>=2.0.16,<3",
+    "uvicorn>=0.34,<1",
+]
