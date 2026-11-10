@@ -1,6 +1,8 @@
 import logging
 import os
 from asyncio import run, sleep
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import asyncpg
@@ -12,10 +14,25 @@ from app.storage.postgres import Postgres, open_postgres
 
 logger = logging.getLogger(__name__)
 HELP = "Send a text note or a standalone HTTP(S) link."
+HEARTBEAT = Path("/tmp/pka-telegram-heartbeat")
 
 
 class TelegramError(Exception):
-    pass
+    def __init__(self, status_code: int | None = None):
+        self.status_code = status_code
+
+
+def healthcheck() -> int:
+    try:
+        last_progress = datetime.fromtimestamp(HEARTBEAT.stat().st_mtime, UTC)
+    except FileNotFoundError:
+        print("Telegram capture has not completed a poll or handled an update yet.")
+        return 1
+
+    stalled = (datetime.now(UTC) - last_progress).total_seconds() >= 90
+    status = "stalled" if stalled else "healthy"
+    print(f"Telegram capture {status}. Last progress: {last_progress.isoformat()}")
+    return int(stalled)
 
 
 async def telegram_request(
@@ -25,6 +42,8 @@ async def telegram_request(
         response = await client.post(method, json=data)
         response.raise_for_status()
         payload = response.json()
+    except httpx.HTTPStatusError as error:
+        raise TelegramError(error.response.status_code) from None
     except (httpx.HTTPError, ValueError):
         # Telegram URLs contain the bot token, and responses can contain notes.
         raise TelegramError from None
@@ -85,13 +104,25 @@ async def poll(
                 timeout=20,
                 allowed_updates=["message"],
             )
+            if not isinstance(updates, list):
+                raise TelegramError
             if not updates:
                 # Telegram can assign a lower update ID after a week of inactivity.
                 offset = 0
+                HEARTBEAT.touch()
             for update in updates:
                 await handle_update(client, db, allowed_user_ids, update)
                 offset = update["update_id"] + 1
-        except TelegramError:
+                HEARTBEAT.touch()
+        except TelegramError as error:
+            if error.status_code in (401, 404):
+                raise RuntimeError(
+                    "Telegram rejected the bot token. Check TELEGRAM_BOT_TOKEN."
+                ) from None
+            if error.status_code == 409:
+                raise RuntimeError(
+                    "Telegram polling conflict. Check for an active webhook or another poller."
+                ) from None
             logger.warning("Could not poll Telegram; retrying")
             await sleep(2)
         except (
@@ -103,7 +134,7 @@ async def poll(
             OSError,
         ) as error:
             logger.warning(
-                "Could not save Telegram note (%s); retrying", type(error).__name__
+                "Could not complete Telegram capture (%s); retrying", type(error).__name__
             )
             await sleep(2)
         except asyncpg.PostgresError as error:
@@ -114,6 +145,7 @@ async def poll(
 
 
 async def main() -> None:
+    HEARTBEAT.unlink(missing_ok=True)
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN to start the bot.")
