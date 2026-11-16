@@ -2,7 +2,7 @@ import json
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 
@@ -84,14 +84,24 @@ class EmbeddingWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_embedder_failure_leaves_note_ready_for_keyword_search(self):
         job = SimpleNamespace(id=1, kind="text", value="Some private note")
         db = SimpleNamespace(
-            claim_job=AsyncMock(return_value=job), finish_job=AsyncMock()
+            claim_job=AsyncMock(return_value=job),
+            finish_job=AsyncMock(),
+            renew_job=AsyncMock(return_value=True),
         )
         embedder = SimpleNamespace(
             embed=AsyncMock(side_effect=EmbeddingError("Provider unavailable."))
         )
 
         with self.assertLogs("app.processing.worker", level="WARNING") as logs:
-            self.assertTrue(await run_once(db, embedder))
+            self.assertTrue(
+                await run_once(
+                    db,
+                    embedder,
+                    summarizer=SimpleNamespace(
+                        summarize=Mock(return_value=("A summary.", []))
+                    ),
+                )
+            )
 
         embedder.embed.assert_awaited_once_with(job.value)
         db.finish_job.assert_awaited_once()

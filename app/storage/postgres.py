@@ -52,7 +52,7 @@ class Postgres:
             FROM notes
             WHERE owner_id = $1
               AND ($2 = '' OR (
-                  (status = 'ready' OR kind = 'url') AND strpos(
+                  (status = 'ready' OR kind = 'url' OR text IS NOT NULL) AND strpos(
                       lower(concat_ws(' ', value, text, summary, array_to_string(tags, ' '))),
                       lower($2)
                   ) > 0
@@ -78,7 +78,7 @@ class Postgres:
         return Note(**row) if row is not None else None
 
     async def claim_job(self) -> Job | None:
-        # A 150-second worker deadline plus persistence must fit inside the lease.
+        # Active workers renew this lease while local CPU/GPU inference runs.
         row = await self._pool.fetchrow(
             """
             WITH next_note AS (
@@ -97,6 +97,19 @@ class Postgres:
             uuid4(),
         )
         return Job(**row) if row is not None else None
+
+    async def renew_job(self, job: Job, *, text: str | None = None) -> bool:
+        note_id = await self._pool.fetchval(
+            """
+            UPDATE notes
+            SET lease_until = now() + interval '4 minutes', text = COALESCE($3, text)
+            WHERE id = $1 AND claim_token = $2 AND status = 'processing'
+              AND lease_until > now()
+            RETURNING id
+            """,
+            job.id, job.claim_token, text,
+        )
+        return note_id is not None
 
     async def finish_job(
         self,
@@ -120,7 +133,7 @@ class Postgres:
         note_id = await self._pool.fetchval(
             """
             UPDATE notes
-            SET status = $1, text = $2, summary = $3, tags = $4, error = $5,
+            SET status = $1, text = COALESCE($2, text), summary = $3, tags = $4, error = $5,
                 embedding = $6::double precision[]::vector, embedding_model = $7,
                 claim_token = NULL, lease_until = NULL
             WHERE id = $8 AND claim_token = $9

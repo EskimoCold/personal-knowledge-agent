@@ -58,10 +58,15 @@ services:
     command: ["python", "-m", "app.processing.worker"]
     environment:
       <<: [*database-env, *embeddings-env]
+      MODEL_PATH: ${MODEL_PATH:-/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf}
+      MODEL_CONTEXT_SIZE: ${MODEL_CONTEXT_SIZE:-4096}
+      MODEL_GPU_LAYERS: ${MODEL_GPU_LAYERS:-0}
       PAGE_FETCH_TIMEOUT_SECONDS: ${PAGE_FETCH_TIMEOUT_SECONDS:-30}
       PAGE_FETCH_MAX_REDIRECTS: ${PAGE_FETCH_MAX_REDIRECTS:-5}
       PAGE_FETCH_MAX_BYTES: ${PAGE_FETCH_MAX_BYTES:-5000000}
       PAGE_FETCH_RETRIES: ${PAGE_FETCH_RETRIES:-2}
+    volumes:
+      - ./models:/models:ro
 
   bot:
     <<: *app
