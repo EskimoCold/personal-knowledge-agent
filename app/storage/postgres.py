@@ -78,6 +78,7 @@ class Postgres:
         return Note(**row) if row is not None else None
 
     async def claim_job(self) -> Job | None:
+        # A 150-second worker deadline plus persistence must fit inside the lease.
         row = await self._pool.fetchrow(
             """
             WITH next_note AS (
@@ -88,7 +89,7 @@ class Postgres:
                 FOR UPDATE SKIP LOCKED
             )
             UPDATE notes
-            SET status = 'processing', claim_token = $1, lease_until = now() + interval '2 minutes'
+            SET status = 'processing', claim_token = $1, lease_until = now() + interval '4 minutes'
             FROM next_note
             WHERE notes.id = next_note.id
             RETURNING notes.id, notes.kind, notes.value, notes.claim_token
