@@ -58,6 +58,10 @@ services:
     command: ["python", "-m", "app.processing.worker"]
     environment:
       <<: [*database-env, *embeddings-env]
+      PAGE_FETCH_TIMEOUT_SECONDS: ${PAGE_FETCH_TIMEOUT_SECONDS:-30}
+      PAGE_FETCH_MAX_REDIRECTS: ${PAGE_FETCH_MAX_REDIRECTS:-5}
+      PAGE_FETCH_MAX_BYTES: ${PAGE_FETCH_MAX_BYTES:-5000000}
+      PAGE_FETCH_RETRIES: ${PAGE_FETCH_RETRIES:-2}
 
   bot:
     <<: *app

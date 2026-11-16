@@ -14,7 +14,9 @@ from fastapi.testclient import TestClient
 from app.intake import web
 from app.intake.telegram import handle_update
 from app.notes.models import Embedding, NoteInput
-from app.processing.processor import DEMO_URL, process
+from app.processing.processor import process
+from app.processing.webpage.config import WebpageConfig
+from app.processing.webpage.fetcher import PageFetcher
 from app.processing.worker import run_once
 from app.storage.postgres import open_postgres
 
@@ -53,6 +55,16 @@ class PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
         )
+        article = Path(__file__).with_name("fixtures").joinpath("article.html").read_bytes()
+
+        def respond(request):
+            body = article if request.url.path == "/garden" else b"<html></html>"
+            return httpx.Response(200, headers={"Content-Type": "text/html"}, stream=httpx.ByteStream(body))
+
+        self.page_client = await self.enterAsyncContext(httpx.AsyncClient(
+            transport=httpx.MockTransport(respond), trust_env=False
+        ))
+        self.fetcher = PageFetcher(self.page_client, WebpageConfig())
 
     async def drop_schema(self, dsn, schema):
         async with connection(dsn) as conn:
@@ -85,7 +97,7 @@ class PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
             paths = []
             for value in (
                 "Нужно настроить межсетевой экран.",
-                DEMO_URL,
+                "https://article.test/garden",
                 "http://127.0.0.1/",
             ):
                 response = client.post("/api/notes", auth=owner, json={"value": value})
@@ -93,9 +105,9 @@ class PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 paths.append(f"/notes/{response.json()['id']}")
 
             self.assertIn("queued", client.get(paths[0], auth=owner).text)
-            self.assertTrue(await run_once(db))
-            self.assertTrue(await run_once(db))
-            self.assertTrue(await run_once(db))
+            self.assertTrue(await run_once(db, fetcher=self.fetcher))
+            self.assertTrue(await run_once(db, fetcher=self.fetcher))
+            self.assertTrue(await run_once(db, fetcher=self.fetcher))
             self.assertFalse(await run_once(db))
 
             search = {"q": "МЕЖСЕТЕВОЙ"}
@@ -103,14 +115,14 @@ class PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(paths[0], client.get("/", auth=other, params=search).text)
             self.assertEqual(client.get(paths[0], auth=other).status_code, 404)
             self.assertIn(
-                "Пример сохранения ссылки.", client.get(paths[1], auth=owner).text
+                "fresh vegetables", client.get(paths[1], auth=owner).text
             )
             self.assertIn("failed", client.get(paths[2], auth=owner).text)
 
     async def test_failed_and_pending_links_are_searchable_only_by_the_owner(self):
         db = await self.start_database()
         failed = await db.enqueue("1", NoteInput.from_text("https://example.org/report"))
-        self.assertTrue(await run_once(db))
+        self.assertTrue(await run_once(db, fetcher=self.fetcher))
         self.assertEqual((await db.get_note("1", failed)).status, "failed")
         pending = await db.enqueue("1", NoteInput.from_text("https://example.org/draft"))
         await db.enqueue("1", NoteInput.from_text("Text note about example.org"))
@@ -148,12 +160,41 @@ class PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
         stale_embedding = Embedding("stale", [1.0, 0.0])
         self.assertFalse(
             await db.finish_job(
-                original_claim, process(note), embedding=stale_embedding
+                original_claim, await process(note), embedding=stale_embedding
             )
         )
-        self.assertTrue(await db.finish_job(replacement, process(note)))
+        self.assertTrue(await db.finish_job(replacement, await process(note)))
         self.assertEqual((await db.get_note("1", note_id)).status, "ready")
         self.assertEqual(await db.search_similar("1", stale_embedding), [])
+        self.assertIsNone(await db.claim_job())
+
+    async def test_extraction_failure_does_not_stop_later_article_persistence(self):
+        db = await self.start_database()
+        failed_id = await db.enqueue("1", NoteInput("url", "https://article.test/empty"))
+        article_id = await db.enqueue("1", NoteInput("url", "https://article.test/garden"))
+        self.assertTrue(await run_once(db, fetcher=self.fetcher))
+        self.assertTrue(await run_once(db, fetcher=self.fetcher))
+        self.assertFalse(await run_once(db, fetcher=self.fetcher))
+        failed = await db.get_note("1", failed_id)
+        self.assertEqual(failed.status, "failed")
+        self.assertIn("article", failed.error)
+        article = await db.get_note("1", article_id)
+        self.assertEqual(article.status, "ready")
+        self.assertIn("fresh vegetables", article.text)
+        self.assertNotIn("Navigation marker", article.text)
+        self.assertEqual(article.tags, [])
+        self.assertTrue(article.summary.endswith("…"))
+
+    async def test_claim_covers_fetch_retries_and_optional_embedding_budget(self):
+        db = await self.start_database()
+        note_id = await db.enqueue("1", NoteInput("url", "https://article.test/garden"))
+        self.assertEqual((await db.claim_job()).id, note_id)
+        # Simulate 90 seconds fetching, 10 seconds backoff and 30 seconds embedding.
+        async with connection(self.dsn) as conn:
+            await conn.execute(
+                "UPDATE notes SET lease_until = lease_until - interval '130 seconds' WHERE id = $1",
+                note_id,
+            )
         self.assertIsNone(await db.claim_job())
 
     async def test_telegram_intake_is_searchable_in_web(self):
