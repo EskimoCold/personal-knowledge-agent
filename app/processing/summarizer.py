@@ -53,7 +53,9 @@ class Summarizer:
             <= self.config.context_size
         )
 
-    def _generate(self, text: str, intermediate: bool = False, short_note: bool = False):
+    def _generate(
+        self, text: str, intermediate: bool = False, short_note: bool = False
+    ):
         tokens = self._tokens(text, intermediate, short_note)
         log = logger.bind(phase="intermediate" if intermediate else "final")
         if len(tokens) + self.config.max_tokens > self.config.context_size:
@@ -106,7 +108,11 @@ class Summarizer:
                 if not isinstance(result, dict) or set(result) != keys:
                     raise ValueError("invalid_fields")
                 summary = result["summary"]
-                if not isinstance(summary, str) or not summary.strip() or "\0" in summary:
+                if (
+                    not isinstance(summary, str)
+                    or not summary.strip()
+                    or "\0" in summary
+                ):
                     raise ValueError("invalid_summary")
                 summary.encode("utf-8")
                 if not intermediate:
@@ -114,7 +120,10 @@ class Summarizer:
                     if (
                         not isinstance(tags, list)
                         or len(tags) > 3
-                        or any(not isinstance(tag, str) or tag not in self.tags for tag in tags)
+                        or any(
+                            not isinstance(tag, str) or tag not in self.tags
+                            for tag in tags
+                        )
                         or len(set(tags)) != len(tags)
                     ):
                         raise ValueError("invalid_tags")
@@ -191,9 +200,13 @@ class Summarizer:
             logger.info("source_chunked", chunks=len(parts))
             sections = []
             for index, part in enumerate(parts, 1):
-                with structlog.contextvars.bound_contextvars(chunk=index, chunks=len(parts)):
+                with structlog.contextvars.bound_contextvars(
+                    chunk=index, chunks=len(parts)
+                ):
                     sections.append(self._generate(part, True)["summary"])
-            combined = "\n\n".join(f"Section {i + 1}: {s}" for i, s in enumerate(sections))
+            combined = "\n\n".join(
+                f"Section {i + 1}: {s}" for i, s in enumerate(sections)
+            )
             result = self._generate(combined)
         logger.info(
             "summarization_completed",

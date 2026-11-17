@@ -47,7 +47,9 @@ class PageFetcher:
                 except httpx.HTTPError:
                     raise PageError("Webpage request failed.") from None
                 else:
-                    return await asyncio.to_thread(extract_article, body, encoding, final_url)
+                    return await asyncio.to_thread(
+                        extract_article, body, encoding, final_url
+                    )
                 if attempt == self.settings.retries:
                     raise PageError(message) from None
                 await asyncio.sleep(self._retry_delay(retry_after, attempt))
@@ -61,7 +63,9 @@ class PageFetcher:
             for redirects in range(self.settings.max_redirects + 1):
                 # Fetching stays stateless across redirects and sequential jobs.
                 self.client.cookies.clear()
-                async with self.client.stream("GET", url, follow_redirects=False) as response:
+                async with self.client.stream(
+                    "GET", url, follow_redirects=False
+                ) as response:
                     if response.status_code in {301, 302, 303, 307, 308}:
                         if redirects == self.settings.max_redirects:
                             raise PageError("Webpage redirect limit exceeded.")
@@ -77,7 +81,9 @@ class PageFetcher:
                         try:
                             url = self._validate_url(str(response.url.join(location)))
                         except (ValueError, httpx.InvalidURL):
-                            raise PageError("Invalid webpage redirect destination.") from None
+                            raise PageError(
+                                "Invalid webpage redirect destination."
+                            ) from None
                         continue
                     if response.status_code in {429, 502, 503, 504}:
                         raise RetryablePageError(
@@ -85,10 +91,14 @@ class PageFetcher:
                             response.headers.get("Retry-After"),
                         )
                     if not 200 <= response.status_code < 300:
-                        raise PageError(f"Webpage server returned HTTP {response.status_code}.")
+                        raise PageError(
+                            f"Webpage server returned HTTP {response.status_code}."
+                        )
                     media_type = (
                         response.headers.get("Content-Type", "")
-                        .partition(";")[0].strip().lower()
+                        .partition(";")[0]
+                        .strip()
+                        .lower()
                     )
                     if media_type not in {"text/html", "application/xhtml+xml"}:
                         raise PageError(
@@ -124,7 +134,7 @@ class PageFetcher:
 
     @staticmethod
     def _retry_delay(header: str | None, attempt: int) -> float:
-        fallback = 0.5 * 2 ** attempt
+        fallback = 0.5 * 2**attempt
         if header is None:
             return fallback
         try:
