@@ -3,6 +3,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import structlog
+
 from app.notes.models import NoteInput
 from app.processing.processor import process
 from app.processing.worker import run_once
@@ -10,6 +12,7 @@ from app.processing.worker import run_once
 
 class ProcessorTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        self.events = self.enterContext(structlog.testing.capture_logs())
         self.summarizer = SimpleNamespace(
             summarize=Mock(return_value=("An English model summary.", ["science"]))
         )

@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from typing import ClassVar
 from unittest.mock import Mock, patch
 
+import structlog
+
 from app.processing.exceptions import ProcessingError
 from app.processing.model_config import ModelConfig
 from app.processing.summarizer import Summarizer, open_summarizer
@@ -46,6 +48,9 @@ class FakeModel:
 
 
 class SummarizerTests(unittest.TestCase):
+    def setUp(self):
+        self.events = self.enterContext(structlog.testing.capture_logs())
+
     def make(self, responses=None, config=None):
         model = FakeModel(responses)
         return Summarizer(
@@ -142,6 +147,24 @@ class SummarizerTests(unittest.TestCase):
         ):
             summarizer.summarize("Private text")
         self.assertEqual(len(model.calls), 1)
+        failure = next(e for e in self.events if e["event"] == "model_generation_failed")
+        self.assertEqual(failure["error_type"], "RuntimeError")
+        self.assertNotIn("private path and source", str(self.events))
+        self.assertNotIn("Private text", str(self.events))
+
+    def test_generation_logs_retry_and_completion_without_source(self):
+        summarizer, model = self.make(["bad", {"summary": "Valid.", "tags": []}])
+        summarizer.summarize("Confidential note body")
+        events = [e for e in self.events if e["event"].startswith("model_")]
+        self.assertEqual([e["event"] for e in events], ["model_generation_started",
+                         "model_response_invalid", "model_generation_started",
+                         "model_generation_completed"])
+        self.assertEqual(events[0]["attempt"], 1)
+        self.assertEqual(events[2]["attempt"], 2)
+        self.assertEqual(events[0]["phase"], "final")
+        self.assertGreater(events[0]["prompt_tokens"], 0)
+        self.assertGreaterEqual(events[-1]["duration_seconds"], 0)
+        self.assertNotIn("Confidential note body", str(events))
 
     def test_long_paragraphs_and_unbroken_text_preserve_entire_source(self):
         for text in [("A complete paragraph.\n\n" * 800), "a" * 12_000]:

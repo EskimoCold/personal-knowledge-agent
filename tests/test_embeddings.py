@@ -1,6 +1,7 @@
 import json
 import os
 import unittest
+import structlog
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -92,7 +93,7 @@ class EmbeddingWorkerTests(unittest.IsolatedAsyncioTestCase):
             embed=AsyncMock(side_effect=EmbeddingError("Provider unavailable."))
         )
 
-        with self.assertLogs("app.processing.worker", level="WARNING") as logs:
+        with structlog.testing.capture_logs() as logs:
             self.assertTrue(
                 await run_once(
                     db,
@@ -109,4 +110,5 @@ class EmbeddingWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(finish.args[0], job)
         self.assertEqual(finish.args[1].text, job.value)
         self.assertIsNone(finish.kwargs["embedding"])
-        self.assertNotIn(job.value, "\n".join(logs.output))
+        self.assertNotIn(job.value, str(logs))
+        self.assertIn("embedding_failed", [event["event"] for event in logs])
