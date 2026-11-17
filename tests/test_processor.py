@@ -12,7 +12,11 @@ from app.processing.worker import run_once
 
 class ProcessorTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.events = self.enterContext(structlog.testing.capture_logs())
+        self.events = self.enterContext(
+            structlog.testing.capture_logs(
+                processors=[structlog.contextvars.merge_contextvars]
+            )
+        )
         self.summarizer = SimpleNamespace(
             summarize=Mock(return_value=("An English model summary.", ["science"]))
         )
@@ -28,6 +32,32 @@ class ProcessorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.text, "  My\nplain text  ")
         self.assertEqual(result.summary, "An English model summary.")
         self.assertEqual(result.tags, ["science"])
+
+    async def test_generation_thread_logs_keep_job_id_without_leaking_between_jobs(
+        self,
+    ):
+        def generate(_):
+            structlog.get_logger("test_model").info("test_generation")
+            return "An English result.", []
+
+        self.summarizer.summarize.side_effect = generate
+        db = SimpleNamespace(
+            claim_job=AsyncMock(
+                side_effect=[
+                    SimpleNamespace(id=1, kind="text", value="Private first note"),
+                    SimpleNamespace(id=2, kind="text", value="Private second note"),
+                ]
+            ),
+            finish_job=AsyncMock(),
+        )
+        await self.run_job(db)
+        await self.run_job(db)
+        self.assertEqual(
+            [e["note_id"] for e in self.events if e["event"] == "test_generation"],
+            [1, 2],
+        )
+        self.assertNotIn("note_id", structlog.contextvars.get_contextvars())
+        self.assertNotIn("Private first note", str(self.events))
 
     async def test_url_summarizes_extracted_text(self):
         text = "Readable article. " * 30

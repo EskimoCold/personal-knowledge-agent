@@ -21,18 +21,26 @@ def configure_logging() -> None:
         else structlog.dev.ConsoleRenderer(colors=sys.stdout.isatty())
     )
     handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(structlog.stdlib.ProcessorFormatter(
-        foreign_pre_chain=[*shared, structlog.stdlib.ExtraAdder()],
-        processors=[structlog.stdlib.ProcessorFormatter.remove_processors_meta, renderer],
-    ))
+    handler.setFormatter(
+        structlog.stdlib.ProcessorFormatter(
+            foreign_pre_chain=[*shared, structlog.stdlib.ExtraAdder()],
+            processors=[
+                structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                renderer,
+            ],
+        )
+    )
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(logging.INFO)
     # HTTP request URLs can contain private query strings or API tokens.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     structlog.configure(
-        processors=[structlog.stdlib.filter_by_level, *shared,
-                    structlog.stdlib.ProcessorFormatter.wrap_for_formatter],
+        processors=[
+            structlog.stdlib.filter_by_level,
+            *shared,
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ],
         wrapper_class=structlog.stdlib.BoundLogger,
         logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=False,

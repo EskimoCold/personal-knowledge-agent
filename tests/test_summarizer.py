@@ -147,18 +147,26 @@ class SummarizerTests(unittest.TestCase):
         ):
             summarizer.summarize("Private text")
         self.assertEqual(len(model.calls), 1)
-        failure = next(e for e in self.events if e["event"] == "model_generation_failed")
+        failure = next(
+            e for e in self.events if e["event"] == "model_generation_failed"
+        )
         self.assertEqual(failure["error_type"], "RuntimeError")
         self.assertNotIn("private path and source", str(self.events))
         self.assertNotIn("Private text", str(self.events))
 
     def test_generation_logs_retry_and_completion_without_source(self):
-        summarizer, model = self.make(["bad", {"summary": "Valid.", "tags": []}])
+        summarizer, _model = self.make(["bad", {"summary": "Valid.", "tags": []}])
         summarizer.summarize("Confidential note body")
         events = [e for e in self.events if e["event"].startswith("model_")]
-        self.assertEqual([e["event"] for e in events], ["model_generation_started",
-                         "model_response_invalid", "model_generation_started",
-                         "model_generation_completed"])
+        self.assertEqual(
+            [e["event"] for e in events],
+            [
+                "model_generation_started",
+                "model_response_invalid",
+                "model_generation_started",
+                "model_generation_completed",
+            ],
+        )
         self.assertEqual(events[0]["attempt"], 1)
         self.assertEqual(events[2]["attempt"], 2)
         self.assertEqual(events[0]["phase"], "final")

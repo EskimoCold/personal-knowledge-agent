@@ -35,7 +35,9 @@ async def run_once(
             async with asyncio.TaskGroup() as group:
                 renewal = group.create_task(_renew_lease(db, job))
                 try:
-                    result, error, embedding = await _process_job(db, job, embedder, fetcher, summarizer)
+                    result, error, embedding = await _process_job(
+                        db, job, embedder, fetcher, summarizer
+                    )
                 finally:
                     renewal.cancel()
             saved = await db.finish_job(job, result, error=error, embedding=embedding)
@@ -45,8 +47,12 @@ async def run_once(
         except Exception as exc:
             logger.error("job_aborted", error_type=type(exc).__name__)
             raise
-        logger.info("job_finished", status="failed" if error else "ready", persisted=bool(saved),
-                    duration_seconds=round(time.perf_counter() - started, 3))
+        logger.info(
+            "job_finished",
+            status="failed" if error else "ready",
+            persisted=bool(saved),
+            duration_seconds=round(time.perf_counter() - started, 3),
+        )
     return True
 
 
@@ -89,7 +95,9 @@ async def _process_job(db, job, embedder, fetcher, summarizer):
         logger.warning("job_processing_failed", stage=stage, reason=str(exc))
         return None, str(exc), None
     except Exception as exc:  # noqa: BLE001 - isolate unexpected failures to this job.
-        logger.error("job_processing_failed", stage=stage, error_type=type(exc).__name__)
+        logger.error(
+            "job_processing_failed", stage=stage, error_type=type(exc).__name__
+        )
         return None, "Processing failed.", None
     else:
         return result, None, embedding

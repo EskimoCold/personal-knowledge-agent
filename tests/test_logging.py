@@ -33,7 +33,9 @@ class LoggingTests(unittest.TestCase):
         with patch.dict(os.environ, {"LOG_FORMAT": "json"}), redirect_stdout(output):
             configure_logging()
             with structlog.contextvars.bound_contextvars(note_id=7):
-                structlog.get_logger("test").info("generation_started", prompt_tokens=100)
+                structlog.get_logger("test").info(
+                    "generation_started", prompt_tokens=100
+                )
                 logging.getLogger("legacy").warning("Something failed")
         rows = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual(rows[0]["event"], "generation_started")
@@ -54,6 +56,8 @@ class LoggingTests(unittest.TestCase):
         self.assertNotIn("\x1b[", output.getvalue())
 
     def test_invalid_format_fails_explicitly(self):
-        with patch.dict(os.environ, {"LOG_FORMAT": "xml"}):
-            with self.assertRaisesRegex(ValueError, "LOG_FORMAT"):
-                configure_logging()
+        with (
+            patch.dict(os.environ, {"LOG_FORMAT": "xml"}),
+            self.assertRaisesRegex(ValueError, "LOG_FORMAT"),
+        ):
+            configure_logging()
