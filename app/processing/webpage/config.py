@@ -11,7 +11,10 @@ class WebpageConfig:
     retries: int = 2
 
     def __post_init__(self) -> None:
-        if not math.isfinite(self.timeout_seconds) or not 0 < self.timeout_seconds <= 30:
+        if (
+            not math.isfinite(self.timeout_seconds)
+            or not 0 < self.timeout_seconds <= 30
+        ):
             raise ValueError(
                 "PAGE_FETCH_TIMEOUT_SECONDS must be greater than 0 and at most 30."
             )

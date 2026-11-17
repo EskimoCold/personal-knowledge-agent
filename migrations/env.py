@@ -8,7 +8,6 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-
 if context.config.config_file_name:
     fileConfig(context.config.config_file_name)
 

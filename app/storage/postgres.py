@@ -107,7 +107,9 @@ class Postgres:
               AND lease_until > now()
             RETURNING id
             """,
-            job.id, job.claim_token, text,
+            job.id,
+            job.claim_token,
+            text,
         )
         return note_id is not None
 

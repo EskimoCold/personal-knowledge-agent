@@ -1,8 +1,8 @@
 import asyncio
-import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import pytest
 import structlog
 
 from app.notes.models import NoteInput
@@ -10,16 +10,16 @@ from app.processing.processor import process
 from app.processing.worker import run_once
 
 
-class ProcessorTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        self.events = self.enterContext(
-            structlog.testing.capture_logs(
-                processors=[structlog.contextvars.merge_contextvars]
-            )
-        )
+class TestProcessor:
+    @pytest.fixture(autouse=True)
+    def processor_dependencies(self):
         self.summarizer = SimpleNamespace(
             summarize=Mock(return_value=("An English model summary.", ["science"]))
         )
+        with structlog.testing.capture_logs(
+            processors=[structlog.contextvars.merge_contextvars]
+        ) as self.events:
+            yield
 
     async def run_job(self, db, embedder=None, fetcher=None):
         db.renew_job = AsyncMock(return_value=True)
@@ -29,9 +29,9 @@ class ProcessorTests(unittest.IsolatedAsyncioTestCase):
         result = await process(
             NoteInput("text", "  My\nplain text  "), summarizer=self.summarizer
         )
-        self.assertEqual(result.text, "  My\nplain text  ")
-        self.assertEqual(result.summary, "An English model summary.")
-        self.assertEqual(result.tags, ["science"])
+        assert result.text == "  My\nplain text  "
+        assert result.summary == "An English model summary."
+        assert result.tags == ["science"]
 
     async def test_generation_thread_logs_keep_job_id_without_leaking_between_jobs(
         self,
@@ -52,12 +52,11 @@ class ProcessorTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.run_job(db)
         await self.run_job(db)
-        self.assertEqual(
-            [e["note_id"] for e in self.events if e["event"] == "test_generation"],
-            [1, 2],
-        )
-        self.assertNotIn("note_id", structlog.contextvars.get_contextvars())
-        self.assertNotIn("Private first note", str(self.events))
+        assert [
+            e["note_id"] for e in self.events if e["event"] == "test_generation"
+        ] == [1, 2]
+        assert "note_id" not in structlog.contextvars.get_contextvars()
+        assert "Private first note" not in str(self.events)
 
     async def test_url_summarizes_extracted_text(self):
         text = "Readable article. " * 30
@@ -67,9 +66,9 @@ class ProcessorTests(unittest.IsolatedAsyncioTestCase):
         result = await process(
             NoteInput("url", "https://article.test/"), fetcher, self.summarizer
         )
-        self.assertEqual(result.text, text)
-        self.assertEqual(result.summary, "An English model summary.")
-        self.assertEqual(result.tags, ["science"])
+        assert result.text == text
+        assert result.summary == "An English model summary."
+        assert result.tags == ["science"]
 
     async def test_worker_persists_article_and_embeds_extracted_text(self):
         from app.notes.models import Embedding
@@ -88,10 +87,10 @@ class ProcessorTests(unittest.IsolatedAsyncioTestCase):
         )
         embedding = Embedding("test", [1.0])
         embedder = SimpleNamespace(embed=AsyncMock(return_value=embedding))
-        self.assertTrue(await self.run_job(db, embedder, fetcher))
+        assert await self.run_job(db, embedder, fetcher)
         finish = db.finish_job.await_args
-        self.assertEqual(finish.args[1].text, "Article body")
-        self.assertEqual(finish.kwargs["embedding"], embedding)
+        assert finish.args[1].text == "Article body"
+        assert finish.kwargs["embedding"] == embedding
         embedder.embed.assert_awaited_once_with("Article body")
 
     async def test_extraction_failure_fails_job_and_later_note_still_runs(self):
@@ -108,12 +107,12 @@ class ProcessorTests(unittest.IsolatedAsyncioTestCase):
         fetcher = SimpleNamespace(
             fetch=AsyncMock(side_effect=PageError("No readable article text found."))
         )
-        self.assertTrue(await self.run_job(db, fetcher=fetcher))
-        self.assertEqual(db.finish_job.await_args.args, (failed, None))
-        self.assertIn("article", db.finish_job.await_args.kwargs["error"])
-        self.assertTrue(await self.run_job(db, fetcher=fetcher))
-        self.assertEqual(db.finish_job.await_args.args[1].text, "Later note")
-        self.assertFalse(await self.run_job(db, fetcher=fetcher))
+        assert await self.run_job(db, fetcher=fetcher)
+        assert db.finish_job.await_args.args == (failed, None)
+        assert "article" in db.finish_job.await_args.kwargs["error"]
+        assert await self.run_job(db, fetcher=fetcher)
+        assert db.finish_job.await_args.args[1].text == "Later note"
+        assert not await self.run_job(db, fetcher=fetcher)
 
     async def test_processing_deadline_fails_slow_extraction_and_worker_continues(self):
         async def slow_fetch(_):
@@ -129,11 +128,11 @@ class ProcessorTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "app.processing.worker.PROCESSING_TIMEOUT_SECONDS", 0.01, create=True
         ):
-            self.assertTrue(await self.run_job(db, fetcher=fetcher))
-            self.assertIsNone(db.finish_job.await_args.args[1])
-            self.assertIn("timed out", db.finish_job.await_args.kwargs["error"])
-            self.assertTrue(await self.run_job(db, fetcher=fetcher))
-            self.assertEqual(db.finish_job.await_args.args[1].text, "Later note")
+            assert await self.run_job(db, fetcher=fetcher)
+            assert db.finish_job.await_args.args[1] is None
+            assert "timed out" in db.finish_job.await_args.kwargs["error"]
+            assert await self.run_job(db, fetcher=fetcher)
+            assert db.finish_job.await_args.args[1].text == "Later note"
 
     async def test_deadline_during_embedding_preserves_extracted_article(self):
         async def slow_embed(_):
@@ -153,9 +152,9 @@ class ProcessorTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "app.processing.worker.EMBEDDING_TIMEOUT_SECONDS", 0.01, create=True
         ):
-            self.assertTrue(await self.run_job(db, embedder, fetcher))
-        self.assertEqual(db.finish_job.await_args.args[1].text, "Article")
-        self.assertIsNone(db.finish_job.await_args.kwargs["embedding"])
+            assert await self.run_job(db, embedder, fetcher)
+        assert db.finish_job.await_args.args[1].text == "Article"
+        assert db.finish_job.await_args.kwargs["embedding"] is None
 
     async def test_model_failure_saves_source_and_continues_next_job(self):
         from app.processing.exceptions import ProcessingError
@@ -172,12 +171,12 @@ class ProcessorTests(unittest.IsolatedAsyncioTestCase):
             ProcessingError("Local model generation failed."),
             ("A summary.", []),
         ]
-        self.assertTrue(await self.run_job(db, fetcher=fetcher))
+        assert await self.run_job(db, fetcher=fetcher)
         db.renew_job.assert_awaited_once_with(failed, text="Full source")
-        self.assertEqual(db.finish_job.await_args.args, (failed, None))
-        self.assertIn("model", db.finish_job.await_args.kwargs["error"])
-        self.assertTrue(await self.run_job(db, fetcher=fetcher))
-        self.assertEqual(db.finish_job.await_args.args[1].summary, "A summary.")
+        assert db.finish_job.await_args.args == (failed, None)
+        assert "model" in db.finish_job.await_args.kwargs["error"]
+        assert await self.run_job(db, fetcher=fetcher)
+        assert db.finish_job.await_args.args[1].summary == "A summary."
 
     async def test_cancellation_waits_for_native_inference_to_finish(self):
         import threading
@@ -196,9 +195,9 @@ class ProcessorTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.to_thread(started.wait, 2)
         task.cancel()
         await asyncio.sleep(0.01)
-        self.assertFalse(task.done())
+        assert not task.done()
         release.set()
-        with self.assertRaises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError):
             await task
 
     async def test_slow_inference_renews_lease_without_fetch_timeout(self):
@@ -220,8 +219,8 @@ class ProcessorTests(unittest.IsolatedAsyncioTestCase):
             patch("app.processing.worker.LEASE_RENEWAL_SECONDS", 0.005),
         ):
             await run_once(db, summarizer=self.summarizer)
-        self.assertGreater(db.renew_job.await_count, 2)
-        self.assertEqual(db.finish_job.await_args.args[1].summary, "Done.")
+        assert db.renew_job.await_count > 2
+        assert db.finish_job.await_args.args[1].summary == "Done."
 
     async def test_lost_lease_waits_for_native_call_and_does_not_publish(self):
         import threading
@@ -243,10 +242,10 @@ class ProcessorTests(unittest.IsolatedAsyncioTestCase):
         )
         with (
             patch("app.processing.worker.LEASE_RENEWAL_SECONDS", 0.01),
-            self.assertRaises(ExceptionGroup),
+            pytest.raises(ExceptionGroup),
         ):
             await run_once(db, summarizer=self.summarizer)
-        self.assertTrue(finished.is_set())
+        assert finished.is_set()
         db.finish_job.assert_not_awaited()
 
     async def test_repeated_cancellation_still_waits_for_native_inference(self):
@@ -271,7 +270,7 @@ class ProcessorTests(unittest.IsolatedAsyncioTestCase):
         ended_before_native = task.done()
         release.set()
         await asyncio.gather(task, return_exceptions=True)
-        self.assertFalse(ended_before_native)
+        assert not ended_before_native
 
     async def test_finishing_job_stops_heartbeat_before_clearing_claim(self):
         finished = False
@@ -291,4 +290,4 @@ class ProcessorTests(unittest.IsolatedAsyncioTestCase):
             finish_job=AsyncMock(side_effect=finish),
         )
         with patch("app.processing.worker.LEASE_RENEWAL_SECONDS", 0.005):
-            self.assertTrue(await run_once(db, summarizer=self.summarizer))
+            assert await run_once(db, summarizer=self.summarizer)

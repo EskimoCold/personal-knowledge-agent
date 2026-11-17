@@ -2,7 +2,6 @@
 
 from alembic import op
 
-
 revision = "002_embeddings"
 down_revision = "001_initial"
 branch_labels = None

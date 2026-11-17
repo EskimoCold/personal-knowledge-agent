@@ -1,25 +1,26 @@
 import json
 import os
-import unittest
-import structlog
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
+import pytest
+import structlog
 
 from app.processing.embeddings import Embedder, EmbeddingError, open_embedder
 from app.processing.worker import run_once
 
 
-class EmbedderTests(unittest.IsolatedAsyncioTestCase):
+class TestEmbedder:
     async def test_valid_embedding_is_normalized_and_tagged_with_model(self):
         def respond(request):
-            self.assertEqual(request.method, "POST")
-            self.assertEqual(request.url.path, "/v1/embeddings")
-            self.assertEqual(
-                json.loads(request.content),
-                {"model": "model-a", "input": "Some note", "encoding_format": "float"},
-            )
+            assert request.method == "POST"
+            assert request.url.path == "/v1/embeddings"
+            assert json.loads(request.content) == {
+                "model": "model-a",
+                "input": "Some note",
+                "encoding_format": "float",
+            }
             return httpx.Response(200, json={"data": [{"embedding": [3, 4]}]})
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
@@ -28,21 +29,22 @@ class EmbedderTests(unittest.IsolatedAsyncioTestCase):
             )
             result = await embedder.embed("Some note")
 
-        self.assertEqual(result.model, "model-a")
-        self.assertAlmostEqual(result.values[0], 0.6)
-        self.assertAlmostEqual(result.values[1], 0.8)
+        assert result.model == "model-a"
+        assert result.values[0] == pytest.approx(0.6, abs=5e-8, rel=0)
+        assert result.values[1] == pytest.approx(0.8, abs=5e-8, rel=0)
 
-    async def test_rejects_invalid_vectors(self):
-        for values in ([1], [False, 1], ["1", 2], [0, 0], [1e40, 1], [1e-80, 0]):
-            with self.subTest(values=values):
-                response = httpx.Response(200, json={"data": [{"embedding": values}]})
-                transport = httpx.MockTransport(lambda _: response)
-                async with httpx.AsyncClient(transport=transport) as client:
-                    embedder = Embedder(
-                        client, httpx.URL("http://embed/v1/embeddings"), "model-a", 2
-                    )
-                    with self.assertRaisesRegex(EmbeddingError, "invalid vector"):
-                        await embedder.embed("Some note")
+    @pytest.mark.parametrize(
+        "values", ([1], [False, 1], ["1", 2], [0, 0], [1e40, 1], [1e-80, 0])
+    )
+    async def test_rejects_invalid_vectors(self, values):
+        response = httpx.Response(200, json={"data": [{"embedding": values}]})
+        transport = httpx.MockTransport(lambda _: response)
+        async with httpx.AsyncClient(transport=transport) as client:
+            embedder = Embedder(
+                client, httpx.URL("http://embed/v1/embeddings"), "model-a", 2
+            )
+            with pytest.raises(EmbeddingError, match="invalid vector"):
+                await embedder.embed("Some note")
 
     async def test_status_failure_does_not_expose_endpoint_or_response(self):
         transport = httpx.MockTransport(
@@ -52,15 +54,15 @@ class EmbedderTests(unittest.IsolatedAsyncioTestCase):
             embedder = Embedder(
                 client, httpx.URL("http://embed/v1/embeddings"), "model-a", 2
             )
-            with self.assertRaisesRegex(
-                EmbeddingError, r"^Embedding service request failed\.$"
+            with pytest.raises(
+                EmbeddingError, match="^Embedding service request failed\\.$"
             ):
                 await embedder.embed("Some note")
 
     async def test_unconfigured_endpoint_keeps_embeddings_disabled(self):
         with patch.dict(os.environ, {}, clear=True):
             async with open_embedder() as embedder:
-                self.assertIsNone(embedder)
+                assert embedder is None
 
     async def test_configured_endpoint_reads_dimensions_and_authorization(self):
         with patch.dict(
@@ -74,14 +76,12 @@ class EmbedderTests(unittest.IsolatedAsyncioTestCase):
             clear=True,
         ):
             async with open_embedder() as embedder:
-                self.assertEqual(embedder.model, "model-a")
-                self.assertEqual(embedder.dimensions, 384)
-                self.assertEqual(
-                    embedder.client.headers["Authorization"], "Bearer test-token"
-                )
+                assert embedder.model == "model-a"
+                assert embedder.dimensions == 384
+                assert embedder.client.headers["Authorization"] == "Bearer test-token"
 
 
-class EmbeddingWorkerTests(unittest.IsolatedAsyncioTestCase):
+class TestEmbeddingWorker:
     async def test_embedder_failure_leaves_note_ready_for_keyword_search(self):
         job = SimpleNamespace(id=1, kind="text", value="Some private note")
         db = SimpleNamespace(
@@ -94,21 +94,19 @@ class EmbeddingWorkerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with structlog.testing.capture_logs() as logs:
-            self.assertTrue(
-                await run_once(
-                    db,
-                    embedder,
-                    summarizer=SimpleNamespace(
-                        summarize=Mock(return_value=("A summary.", []))
-                    ),
-                )
+            assert await run_once(
+                db,
+                embedder,
+                summarizer=SimpleNamespace(
+                    summarize=Mock(return_value=("A summary.", []))
+                ),
             )
 
         embedder.embed.assert_awaited_once_with(job.value)
         db.finish_job.assert_awaited_once()
         finish = db.finish_job.await_args
-        self.assertIs(finish.args[0], job)
-        self.assertEqual(finish.args[1].text, job.value)
-        self.assertIsNone(finish.kwargs["embedding"])
-        self.assertNotIn(job.value, str(logs))
-        self.assertIn("embedding_failed", [event["event"] for event in logs])
+        assert finish.args[0] is job
+        assert finish.args[1].text == job.value
+        assert finish.kwargs["embedding"] is None
+        assert job.value not in str(logs)
+        assert "embedding_failed" in [event["event"] for event in logs]

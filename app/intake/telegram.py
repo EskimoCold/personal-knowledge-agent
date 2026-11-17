@@ -11,7 +11,6 @@ import httpx
 from app.notes.models import NoteInput
 from app.storage.postgres import Postgres, open_postgres
 
-
 logger = logging.getLogger(__name__)
 HELP = "Send a text note or a standalone HTTP(S) link."
 HEARTBEAT = Path("/tmp/pka-telegram-heartbeat")
@@ -134,7 +133,8 @@ async def poll(
             OSError,
         ) as error:
             logger.warning(
-                "Could not complete Telegram capture (%s); retrying", type(error).__name__
+                "Could not complete Telegram capture (%s); retrying",
+                type(error).__name__,
             )
             await sleep(2)
         except asyncpg.PostgresError as error:
