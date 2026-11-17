@@ -1,0 +1,17 @@
+version: 1
+tags:
+  ai-ml: machine learning, LLMs, model training and evaluation
+  software-development: programming, libraries and application development
+  data-analytics: statistics, experiments, analytics and visualization
+  data-engineering: databases, ETL, storage and data pipelines
+  infrastructure: servers, cloud, containers, networks and operations
+  cybersecurity: security, vulnerabilities and privacy
+  hardware: processors, GPUs, devices and computer architecture
+  science: scientific research not covered by a more specific tag
+  business: companies, management, entrepreneurship and strategy
+  economics-finance: economics, markets, investing and personal finance
+  product-marketing: product management, UX research, marketing and growth
+  career-education: careers, interviews, education and learning
+  health-fitness: health, medicine, exercise and nutrition
+  arts-culture: art, design, literature, film and music
+  society-politics: society, politics and public policy

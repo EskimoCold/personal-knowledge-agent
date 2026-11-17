@@ -4,7 +4,8 @@ import sys
 import unittest
 from contextlib import asynccontextmanager
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 import asyncpg
@@ -35,6 +36,9 @@ async def connection(dsn):
 )
 class PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        self.summarizer = SimpleNamespace(
+            summarize=Mock(return_value=("An English model summary.", []))
+        )
         base_dsn = os.environ["PKA_TEST_DATABASE_URL"]
         self.schema_name = f"test_{uuid4().hex}"
         async with connection(base_dsn) as conn:
@@ -55,16 +59,25 @@ class PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
         )
-        article = Path(__file__).with_name("fixtures").joinpath("article.html").read_bytes()
+        article = (
+            Path(__file__).with_name("fixtures").joinpath("article.html").read_bytes()
+        )
 
         def respond(request):
             body = article if request.url.path == "/garden" else b"<html></html>"
-            return httpx.Response(200, headers={"Content-Type": "text/html"}, stream=httpx.ByteStream(body))
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/html"},
+                stream=httpx.ByteStream(body),
+            )
 
-        self.page_client = await self.enterAsyncContext(httpx.AsyncClient(
-            transport=httpx.MockTransport(respond), trust_env=False
-        ))
+        self.page_client = await self.enterAsyncContext(
+            httpx.AsyncClient(transport=httpx.MockTransport(respond), trust_env=False)
+        )
         self.fetcher = PageFetcher(self.page_client, WebpageConfig())
+
+    async def run_job(self, db, embedder=None, fetcher=None):
+        return await run_once(db, embedder, fetcher, summarizer=self.summarizer)
 
     async def drop_schema(self, dsn, schema):
         async with connection(dsn) as conn:
@@ -105,26 +118,28 @@ class PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 paths.append(f"/notes/{response.json()['id']}")
 
             self.assertIn("queued", client.get(paths[0], auth=owner).text)
-            self.assertTrue(await run_once(db, fetcher=self.fetcher))
-            self.assertTrue(await run_once(db, fetcher=self.fetcher))
-            self.assertTrue(await run_once(db, fetcher=self.fetcher))
-            self.assertFalse(await run_once(db))
+            self.assertTrue(await self.run_job(db, fetcher=self.fetcher))
+            self.assertTrue(await self.run_job(db, fetcher=self.fetcher))
+            self.assertTrue(await self.run_job(db, fetcher=self.fetcher))
+            self.assertFalse(await self.run_job(db))
 
             search = {"q": "МЕЖСЕТЕВОЙ"}
             self.assertIn(paths[0], client.get("/", auth=owner, params=search).text)
             self.assertNotIn(paths[0], client.get("/", auth=other, params=search).text)
             self.assertEqual(client.get(paths[0], auth=other).status_code, 404)
-            self.assertIn(
-                "fresh vegetables", client.get(paths[1], auth=owner).text
-            )
+            self.assertIn("fresh vegetables", client.get(paths[1], auth=owner).text)
             self.assertIn("failed", client.get(paths[2], auth=owner).text)
 
     async def test_failed_and_pending_links_are_searchable_only_by_the_owner(self):
         db = await self.start_database()
-        failed = await db.enqueue("1", NoteInput.from_text("https://example.org/report"))
-        self.assertTrue(await run_once(db, fetcher=self.fetcher))
+        failed = await db.enqueue(
+            "1", NoteInput.from_text("https://example.org/report")
+        )
+        self.assertTrue(await self.run_job(db, fetcher=self.fetcher))
         self.assertEqual((await db.get_note("1", failed)).status, "failed")
-        pending = await db.enqueue("1", NoteInput.from_text("https://example.org/draft"))
+        pending = await db.enqueue(
+            "1", NoteInput.from_text("https://example.org/draft")
+        )
         await db.enqueue("1", NoteInput.from_text("Text note about example.org"))
 
         matches = await db.list_notes("1", "EXAMPLE.ORG")
@@ -160,21 +175,31 @@ class PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
         stale_embedding = Embedding("stale", [1.0, 0.0])
         self.assertFalse(
             await db.finish_job(
-                original_claim, await process(note), embedding=stale_embedding
+                original_claim,
+                await process(note, summarizer=self.summarizer),
+                embedding=stale_embedding,
             )
         )
-        self.assertTrue(await db.finish_job(replacement, await process(note)))
+        self.assertTrue(
+            await db.finish_job(
+                replacement, await process(note, summarizer=self.summarizer)
+            )
+        )
         self.assertEqual((await db.get_note("1", note_id)).status, "ready")
         self.assertEqual(await db.search_similar("1", stale_embedding), [])
         self.assertIsNone(await db.claim_job())
 
     async def test_extraction_failure_does_not_stop_later_article_persistence(self):
         db = await self.start_database()
-        failed_id = await db.enqueue("1", NoteInput("url", "https://article.test/empty"))
-        article_id = await db.enqueue("1", NoteInput("url", "https://article.test/garden"))
-        self.assertTrue(await run_once(db, fetcher=self.fetcher))
-        self.assertTrue(await run_once(db, fetcher=self.fetcher))
-        self.assertFalse(await run_once(db, fetcher=self.fetcher))
+        failed_id = await db.enqueue(
+            "1", NoteInput("url", "https://article.test/empty")
+        )
+        article_id = await db.enqueue(
+            "1", NoteInput("url", "https://article.test/garden")
+        )
+        self.assertTrue(await self.run_job(db, fetcher=self.fetcher))
+        self.assertTrue(await self.run_job(db, fetcher=self.fetcher))
+        self.assertFalse(await self.run_job(db, fetcher=self.fetcher))
         failed = await db.get_note("1", failed_id)
         self.assertEqual(failed.status, "failed")
         self.assertIn("article", failed.error)
@@ -183,7 +208,7 @@ class PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("fresh vegetables", article.text)
         self.assertNotIn("Navigation marker", article.text)
         self.assertEqual(article.tags, [])
-        self.assertTrue(article.summary.endswith("…"))
+        self.assertEqual(article.summary, "An English model summary.")
 
     async def test_claim_covers_fetch_retries_and_optional_embedding_budget(self):
         db = await self.start_database()
@@ -196,6 +221,46 @@ class PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 note_id,
             )
         self.assertIsNone(await db.claim_job())
+
+    async def test_model_failure_retains_searchable_source_and_later_job_runs(self):
+        from app.processing.exceptions import ProcessingError
+
+        db = await self.start_database()
+        failed_id = await db.enqueue("1", NoteInput("text", "Retained failure marker"))
+        later_id = await db.enqueue("1", NoteInput("text", "Next source"))
+        self.summarizer.summarize.side_effect = [
+            ProcessingError("Local model generation failed."),
+            ("English result.", ["science"]),
+        ]
+        await self.run_job(db)
+        failed = await db.get_note("1", failed_id)
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.text, "Retained failure marker")
+        self.assertIsNone(failed.summary)
+        self.assertEqual(failed.tags, [])
+        self.assertEqual(
+            [n.id for n in await db.list_notes("1", "failure marker")], [failed_id]
+        )
+        self.assertEqual(await db.list_notes("2", "failure marker"), [])
+        await self.run_job(db)
+        self.assertEqual((await db.get_note("1", later_id)).status, "ready")
+
+    async def test_renewal_saves_source_and_old_claim_cannot_renew_or_finish(self):
+        db = await self.start_database()
+        note_id = await db.enqueue("1", NoteInput("url", "https://article.test/garden"))
+        original = await db.claim_job()
+        self.assertTrue(await db.renew_job(original, text="Extracted source"))
+        self.assertEqual((await db.get_note("1", note_id)).text, "Extracted source")
+        async with connection(self.dsn) as conn:
+            await conn.execute(
+                "UPDATE notes SET lease_until = now() WHERE id = $1", note_id
+            )
+        self.assertFalse(await db.renew_job(original, text="Stale source"))
+        replacement = await db.claim_job()
+        self.assertFalse(await db.renew_job(original))
+        self.assertFalse(await db.finish_job(original, None, error="stale"))
+        self.assertTrue(await db.finish_job(replacement, None, error="model failed"))
+        self.assertEqual((await db.get_note("1", note_id)).text, "Extracted source")
 
     async def test_telegram_intake_is_searchable_in_web(self):
         db = await self.start_database()
@@ -219,7 +284,7 @@ class PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await handle_update(client, db, {1}, update)
 
         [note] = await db.list_notes("1")
-        self.assertTrue(await run_once(db))
+        self.assertTrue(await self.run_job(db))
         with TestClient(web.app) as client:
             response = client.get("/", auth=("1", "first"), params={"q": "Сохранено"})
             self.assertIn(f"/notes/{note.id}", response.text)
@@ -253,7 +318,9 @@ class PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
         ):
             owner_id = "2" if text == "Private firewall" else "1"
             note_ids[text] = await db.enqueue(owner_id, NoteInput.from_text(text))
-            self.assertTrue(await run_once(db, embedder if text in vectors else None))
+            self.assertTrue(
+                await self.run_job(db, embedder if text in vectors else None)
+            )
 
         async with connection(self.dsn) as conn:
             stored = await conn.fetchrow(

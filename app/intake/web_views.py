@@ -98,7 +98,7 @@ def render_home(
     return page(
         "Notes",
         f"""<h1>Personal Knowledge Agent</h1>
-<p>Local demo with stub processing.</p>
+<p>Save sources with English summaries and topic tags.</p>
 {NOTE_FORM}
 <form action="/" method="get">
   <label for="q">Search notes</label>
@@ -130,6 +130,6 @@ def render_note(note: Note) -> HTMLResponse:
         f"Note {note_id}",
         f"""<p><a href="/">All notes</a></p>
 <h1>Note {note_id}</h1>
-<p>Status <strong>{escape(note.status)}</strong> · Stub processing</p>
+<p>Status <strong>{escape(note.status)}</strong></p>
 {sections}""",
     )
