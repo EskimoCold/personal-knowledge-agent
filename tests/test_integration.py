@@ -70,6 +70,8 @@ class TestPostgresIntegration:
             )
 
             def respond(request):
+                if request.url.host == "api.keenable.ai":
+                    return httpx.Response(422)
                 body = article if request.url.path == "/garden" else b"<html></html>"
                 return httpx.Response(
                     200,

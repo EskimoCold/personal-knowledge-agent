@@ -129,24 +129,29 @@ class TestFetch:
         assert "hidden" not in str(caught.value)
 
     @pytest.mark.parametrize(
-        "response, message",
+        "response",
         (
-            (
-                html_response(b"<html><body><script>run()</script></body></html>"),
-                "article",
-            ),
-            (httpx.Response(200, headers={"Content-Type": "application/pdf"}), "HTML"),
-            (httpx.Response(200, headers={"Content-Type": "image/png"}), "HTML"),
-            (httpx.Response(200), "HTML"),
+            html_response(b"<html><body><script>loadArticle()</script></body></html>"),
+            httpx.Response(200, headers={"Content-Type": "application/pdf"}),
+            httpx.Response(200),
         ),
     )
-    async def test_rejects_empty_html_and_unsupported_content_without_retries(
-        self, response, message
-    ):
-        calls = []
-        with pytest.raises(PageError, match=message):
-            await self.fetch(lambda _: calls.append(1) or response)
-        assert len(calls) == 1
+    async def test_uses_keenable_for_unreadable_html_or_other_formats(self, response):
+        url = "https://article.test/#/quickstart"
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            if len(requests) == 1:
+                return response
+            assert request.url.host == "api.keenable.ai"
+            assert request.url.params["url"] == url
+            assert request.url.params["live"] == "true"
+            assert "X-Keenable-Title" in request.headers
+            return httpx.Response(200, json={"content": "Rendered article"})
+
+        assert (await self.fetch(respond, url)).text == "Rendered article"
+        assert len(requests) == 2
 
     @pytest.mark.parametrize("headers", ({}, {"Content-Length": "1"}))
     async def test_stream_limit_ignores_absent_or_misleading_content_length(
@@ -379,3 +384,25 @@ class TestConfiguration:
         ):
             with pytest.raises(ValueError):
                 replace(WebpageConfig(), **settings)
+
+
+@pytest.mark.parametrize(
+    ("response", "error"),
+    [
+        (httpx.Response(422), "422"),
+        (httpx.Response(200, text="upstream error"), "Invalid response"),
+        (httpx.Response(200, json={"content": " "}), "No readable"),
+        (
+            httpx.Response(200, json={"content": "partial", "truncated": True}),
+            "size limit",
+        ),
+    ],
+)
+async def test_bad_results_do_not_become_notes(response, error):
+    def respond(request):
+        if request.url.host == "api.keenable.ai":
+            return response
+        return httpx.Response(200, headers={"Content-Type": "text/plain"})
+
+    with pytest.raises(PageError, match=error):
+        await TestFetch().fetch(respond)
