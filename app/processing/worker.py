@@ -4,7 +4,7 @@ import time
 import structlog
 
 from app.logging import configure_logging
-from app.notes.models import Job, NoteInput
+from app.notes.models import Job, NoteInput, ProcessedNote
 from app.processing.embeddings import Embedder, EmbeddingError, open_embedder
 from app.processing.exceptions import ProcessingError
 from app.processing.processor import extract_text, process
@@ -78,16 +78,31 @@ async def _process_job(db, job, embedder, fetcher, summarizer):
         if not await db.renew_job(job, text=text):
             raise RuntimeError("The worker lost its job claim.")
         stage = "generation"
-        result = await process(NoteInput("text", text), summarizer=summarizer)
+        image = job.image if job.kind == "image" else None
+        if job.kind == "image" and (not image or embedder is None):
+            return None, "Photo embedding is unavailable.", None
+        if image and not text:
+            result = ProcessedNote(text="", summary=None, tags=[])
+        else:
+            result = await process(NoteInput("text", text), summarizer=summarizer)
         if embedder is not None:
             stage = "embedding"
             logger.info("embedding_started")
             try:
                 async with asyncio.timeout(EMBEDDING_TIMEOUT_SECONDS):
-                    embedding = await embedder.embed(result.text)
+                    if image:
+                        embedding = await embedder.embed(
+                            result.summary or "", document=True, image=image
+                        )
+                    else:
+                        embedding = await embedder.embed(
+                            result.summary or "", document=True
+                        )
                 logger.info("embedding_completed")
             except (EmbeddingError, TimeoutError):
                 logger.warning("embedding_failed")
+                if image:
+                    return None, "Photo embedding is unavailable.", None
     except TimeoutError:
         logger.error("job_processing_failed", stage=stage, reason="timed_out")
         return None, "Note processing timed out.", None

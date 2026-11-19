@@ -18,6 +18,7 @@ def page(title: str, content: str) -> HTMLResponse:
   label {{ display: block; margin-bottom: .3rem; font-weight: 600; }}
   textarea {{ display: block; width: 100%; box-sizing: border-box; margin-bottom: .5rem; }}
   input, button, textarea {{ font: inherit; }}
+  img {{ display: block; max-width: 100%; height: auto; }}
   article {{ border-top: 1px solid #888; padding: .7rem 0; }}
   article p {{ margin: .3rem 0; }}
   .note-text {{ white-space: pre-wrap; overflow-wrap: anywhere; }}
@@ -36,48 +37,67 @@ def page(title: str, content: str) -> HTMLResponse:
 
 
 NOTE_FORM = """
-<form id="note-form" method="post" action="/api/notes">
+<form data-note-form method="post" action="/api/notes">
   <label for="value">Text note or link</label>
   <textarea id="value" name="value" rows="3" required></textarea>
   <button type="submit">Save note</button>
-  <p id="form-status" role="status"></p>
+  <p role="status"></p>
 </form>
+"""
+
+PHOTO_FORM = """
+<form data-note-form method="post" action="/api/photos" enctype="multipart/form-data">
+  <label for="photo">Photo (JPEG or PNG, up to 8 MiB)</label>
+  <input id="photo" name="photo" type="file" accept="image/jpeg,image/png" required>
+  <label for="caption">Caption (optional)</label>
+  <textarea id="caption" name="caption" rows="2" maxlength="12000"></textarea>
+  <button type="submit">Save photo</button>
+  <p role="status"></p>
+</form>
+"""
+
+NOTE_FORM_SCRIPT = """
 <script>
-  const form = document.getElementById("note-form");
-  const button = form.querySelector("button");
-  const status = document.getElementById("form-status");
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    button.disabled = true;
-    status.textContent = "Saving…";
-    try {
-      const value = new FormData(form).get("value");
-      const response = await fetch(form.action, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ value }),
-      });
-      const result = await response.json();
-      if (!response.ok) {
-        const message = typeof result.detail === "string" ? result.detail : "Invalid note.";
-        throw new Error(message);
+  for (const form of document.querySelectorAll("[data-note-form]")) {
+    const button = form.querySelector("button");
+    const status = form.querySelector("[role=status]");
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      button.disabled = true;
+      status.textContent = "Saving…";
+      try {
+        const data = new FormData(form);
+        const isPhoto = form.enctype === "multipart/form-data";
+        const headers = isPhoto ? { "X-PKA-Upload": "1" } : { "Content-Type": "application/json" };
+        const body = isPhoto ? data : JSON.stringify({ value: data.get("value") });
+        const response = await fetch(form.action, { method: "POST", headers, body });
+        const result = await response.json();
+        if (!response.ok) {
+          const message = typeof result.detail === "string" ? result.detail : "Invalid note.";
+          throw new Error(message);
+        }
+        window.location.assign("/notes/" + encodeURIComponent(result.id));
+      } catch (error) {
+        status.textContent = error.message;
+        button.disabled = false;
       }
-      window.location.assign("/notes/" + encodeURIComponent(result.id));
-    } catch (error) {
-      status.textContent = error.message;
-      button.disabled = false;
-    }
-  });
+    });
+  }
 </script>
 """
 
 
 def render_home(
-    notes: list[Note], q: str, *, semantic_available: bool, semantic_selected: bool
+    notes: list[Note],
+    q: str,
+    *,
+    semantic_available: bool,
+    semantic_selected: bool,
+    photos_available: bool = False,
 ) -> HTMLResponse:
     rows = []
     for note in notes:
-        preview = note.summary or note.value
+        preview = note.summary or note.value or "Photo"
         if len(preview) > 160:
             preview = preview[:157] + "…"
         rows.append(
@@ -100,6 +120,8 @@ def render_home(
         f"""<h1>Personal Knowledge Agent</h1>
 <p>Save sources with English summaries and topic tags.</p>
 {NOTE_FORM}
+{PHOTO_FORM if photos_available else ""}
+{NOTE_FORM_SCRIPT}
 <form action="/" method="get">
   <label for="q">Search notes</label>
   <input id="q" name="q" value="{escape(q)}" maxlength="200">{mode_control}
@@ -112,9 +134,10 @@ def render_home(
 
 def render_note(note: Note) -> HTMLResponse:
     note_id = note.id
+    label = {"url": "Submitted link", "image": "Caption", "text": "Submitted text"}
     fields = (
-        ("Submitted link" if note.kind == "url" else "Submitted text", note.value),
-        ("Extracted text", note.text),
+        (label[note.kind], note.value),
+        ("Extracted text", note.text if note.kind != "image" else None),
         ("Summary", note.summary),
         ("Tags", ", ".join(note.tags)),
         ("Error", note.error),
@@ -126,10 +149,16 @@ def render_note(note: Note) -> HTMLResponse:
     )
     if note.status in {"queued", "processing"}:
         sections += f'<p><a href="/notes/{note_id}">Refresh status</a></p>'
+    image = (
+        f'<img src="/notes/{note_id}/photo" alt="Uploaded photo">'
+        if note.kind == "image"
+        else ""
+    )
     return page(
         f"Note {note_id}",
         f"""<p><a href="/">All notes</a></p>
 <h1>Note {note_id}</h1>
 <p>Status <strong>{escape(note.status)}</strong></p>
+{image}
 {sections}""",
     )

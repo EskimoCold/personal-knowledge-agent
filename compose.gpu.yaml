@@ -1,0 +1,7 @@
+services:
+  embeddings:
+    image: personal-knowledge-agent:embeddings-cuda
+    build:
+      args:
+        EMBEDDING_EXTRA: local-embeddings-cuda
+    gpus: all

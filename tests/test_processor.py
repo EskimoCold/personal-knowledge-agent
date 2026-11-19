@@ -70,7 +70,7 @@ class TestProcessor:
         assert result.summary == "An English model summary."
         assert result.tags == ["science"]
 
-    async def test_worker_persists_article_and_embeds_extracted_text(self):
+    async def test_worker_persists_article_and_embeds_summary(self):
         from app.notes.models import Embedding
         from app.processing.webpage.models import ExtractionResult
 
@@ -91,7 +91,9 @@ class TestProcessor:
         finish = db.finish_job.await_args
         assert finish.args[1].text == "Article body"
         assert finish.kwargs["embedding"] == embedding
-        embedder.embed.assert_awaited_once_with("Article body")
+        embedder.embed.assert_awaited_once_with(
+            "An English model summary.", document=True
+        )
 
     async def test_extraction_failure_fails_job_and_later_note_still_runs(self):
         from app.processing.webpage.exceptions import PageError
@@ -135,7 +137,7 @@ class TestProcessor:
             assert db.finish_job.await_args.args[1].text == "Later note"
 
     async def test_deadline_during_embedding_preserves_extracted_article(self):
-        async def slow_embed(_):
+        async def slow_embed(_, *, document):
             from app.notes.models import Embedding
 
             await asyncio.sleep(0.05)
