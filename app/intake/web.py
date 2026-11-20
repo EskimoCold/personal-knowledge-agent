@@ -2,15 +2,22 @@ import json
 import os
 import re
 import secrets
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
+from python_multipart.exceptions import MultipartParseError
+from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile
+from starlette.formparsers import MultiPartException, MultiPartParser
+from starlette.requests import ClientDisconnect
 
 from app.intake.web_views import render_home, render_note
+from app.notes.images import MAX_IMAGE_BYTES, decode_photo
 from app.notes.models import NoteInput
 from app.processing.embeddings import EmbeddingError, open_embedder
 from app.storage.postgres import open_postgres
@@ -88,6 +95,7 @@ async def home(
         q,
         semantic_available=embedder is not None,
         semantic_selected=mode == "semantic",
+        photos_available=getattr(embedder, "supports_images", False),
     )
 
 
@@ -101,6 +109,28 @@ async def detail(
     if note is None:
         raise HTTPException(404, "Note not found")
     return render_note(note)
+
+
+@app.get("/notes/{note_id}/photo")
+async def photo(
+    request: Request,
+    note_id: Annotated[int, Path(gt=0, le=2**63 - 1)],
+    owner_id: Owner,
+) -> Response:
+    saved = await request.state.db.get_photo(owner_id, note_id)
+    if saved is None:
+        raise HTTPException(404, "Photo not found")
+    image, media_type = saved
+    return Response(
+        image,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cross-Origin-Resource-Policy": "same-origin",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 async def require_json(request: Request) -> None:
@@ -123,4 +153,72 @@ async def create_note(
         note_input = NoteInput.from_text(payload.value)
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
+    return {"id": await request.state.db.enqueue(owner_id, note_input)}
+
+
+class PhotoUploadTooLarge(MultiPartException):
+    """The upload exceeded its total request size limit."""
+
+
+class PhotoFormParser(MultiPartParser):
+    complete = False
+
+    def on_end(self) -> None:
+        self.complete = True
+
+
+async def photo_upload_stream(request: Request) -> AsyncGenerator[bytes, None]:
+    size = 0
+    try:
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > MAX_IMAGE_BYTES + 64 * 1024:
+                raise PhotoUploadTooLarge("Upload a photo up to 8 MiB.")
+            yield chunk
+    except ClientDisconnect:
+        raise MultiPartException("Photo upload was interrupted.") from None
+
+
+@app.post("/api/photos", status_code=201)
+async def create_photo(request: Request, owner_id: Owner) -> dict[str, int]:
+    if request.headers.get("x-pka-upload") != "1":
+        raise HTTPException(403, "Missing photo upload header.")
+    if not getattr(request.state.embedder, "supports_images", False):
+        raise HTTPException(503, "Photo uploads require local embeddings.")
+    content_type = request.headers.get("content-type", "").partition(";")[0]
+    if content_type.strip().lower() != "multipart/form-data":
+        raise HTTPException(415, "Send multipart/form-data.")
+    parser = PhotoFormParser(
+        request.headers,
+        photo_upload_stream(request),
+        max_files=1,
+        max_fields=1,
+        max_part_size=48_000,
+    )
+    try:
+        form = await parser.parse()
+    except PhotoUploadTooLarge as exc:
+        raise HTTPException(413, exc.message) from None
+    except (MultiPartException, MultipartParseError):
+        raise HTTPException(422, "Upload one photo and an optional caption.") from None
+    try:
+        upload = form.get("photo")
+        caption = form.get("caption", "")
+        if (
+            not parser.complete
+            or not isinstance(upload, UploadFile)
+            or not isinstance(caption, str)
+            or set(form) - {"photo", "caption"}
+        ):
+            raise HTTPException(422, "Upload one photo and an optional caption.")
+        image = await upload.read(MAX_IMAGE_BYTES + 1)
+        if len(image) > MAX_IMAGE_BYTES:
+            raise HTTPException(413, "Upload a photo up to 8 MiB.")
+        try:
+            _, media_type = await run_in_threadpool(decode_photo, image)
+            note_input = NoteInput.from_photo(caption, image, media_type)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+    finally:
+        await form.close()
     return {"id": await request.state.db.enqueue(owner_id, note_input)}

@@ -15,12 +15,36 @@ x-database-env: &database-env
   DATABASE_URL: postgresql://pka:pka@db/pka
 
 x-embeddings-env: &embeddings-env
+  LOCAL_EMBEDDINGS_URL: ${LOCAL_EMBEDDINGS_URL:-}
   EMBEDDINGS_URL: ${EMBEDDINGS_URL:-}
   EMBEDDINGS_MODEL: ${EMBEDDINGS_MODEL:-}
   EMBEDDINGS_DIMENSIONS: ${EMBEDDINGS_DIMENSIONS:-}
   EMBEDDINGS_API_KEY: ${EMBEDDINGS_API_KEY:-}
 
 services:
+  embeddings:
+    profiles: [embeddings]
+    build:
+      context: .
+      target: embeddings
+    command:
+      - uvicorn
+      - app.processing.embedding_service:app
+      - --host
+      - 0.0.0.0
+      - --no-access-log
+      - --limit-concurrency
+      - "8"
+    volumes:
+      - embedding-model-cache:/model-cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 5m
+      retries: 3
+    restart: unless-stopped
+
   db:
     image: pgvector/pgvector:0.8.7-pg17-trixie
     environment:
@@ -87,4 +111,5 @@ services:
       retries: 1
 
 volumes:
+  embedding-model-cache:
   postgres-data:

@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 from contextlib import AsyncExitStack, asynccontextmanager
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -11,11 +12,14 @@ import asyncpg
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image, ImageDraw
 
 from app.intake import web
 from app.intake.telegram import handle_update
 from app.notes.models import Embedding, NoteInput
+from app.processing.embeddings import EMBEDDINGGEMMA_MODEL, open_embedder
 from app.processing.processor import process
+from app.processing.summarizer import open_summarizer
 from app.processing.webpage.config import WebpageConfig
 from app.processing.webpage.fetcher import PageFetcher
 from app.processing.worker import run_once
@@ -59,6 +63,7 @@ class TestPostgresIntegration:
                         "EMBEDDINGS_MODEL": "",
                         "EMBEDDINGS_DIMENSIONS": "",
                         "EMBEDDINGS_API_KEY": "",
+                        "LOCAL_EMBEDDINGS_URL": "",
                     },
                 )
             )
@@ -309,10 +314,11 @@ class TestPostgresIntegration:
         }
 
         class TestEmbedder:
-            async def embed(self, text):
-                return vectors[text]
+            async def embed(self, text, *, document=False):
+                return vectors[text.removeprefix("Summary of ")]
 
         embedder = TestEmbedder()
+        self.summarizer.summarize.side_effect = lambda text: (f"Summary of {text}", [])
         note_ids = {}
         for text in (
             "Office firewall",
@@ -380,11 +386,113 @@ class TestPostgresIntegration:
                 await conn.fetchval(
                     f"SELECT version_num FROM {self.schema_name}.alembic_version"
                 )
-                == "002_embeddings"
+                == "003_note_images"
             )
             assert (
                 await conn.fetchval(
                     "SELECT to_regclass($1)", f"{self.schema_name}.note_embeddings"
                 )
                 is None
+            )
+
+    @pytest.mark.skipif(
+        not all(
+            os.environ.get(name)
+            for name in ("PKA_TEST_LOCAL_EMBEDDINGS_URL", "PKA_TEST_MODEL_PATH")
+        ),
+        reason="requires the real EmbeddingGemma 2 service and local summarizer weights",
+    )
+    async def test_real_models_store_text_and_photos_and_find_visual_details(self):
+        db = await self.start_database()
+        caption = "An illustration from the personal reference collection."
+
+        def make_photo(shape, color):
+            image = Image.new("RGB", (384, 384), "white")
+            draw = ImageDraw.Draw(image)
+            shape_draw = draw.rectangle if shape == "square" else draw.ellipse
+            shape_draw((52, 52, 332, 332), fill=color)
+            output = BytesIO()
+            image.save(output, "PNG")
+            return output.getvalue()
+
+        photos = (make_photo("square", "red"), make_photo("circle", "green"))
+        owner = ("1", "first")
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "LOCAL_EMBEDDINGS_URL": os.environ["PKA_TEST_LOCAL_EMBEDDINGS_URL"],
+                    "MODEL_PATH": os.environ["PKA_TEST_MODEL_PATH"],
+                    "MODEL_GPU_LAYERS": "0",
+                },
+            ),
+            TestClient(web.app) as client,
+            open_summarizer() as summarizer,
+        ):
+            response = client.post(
+                "/api/notes",
+                auth=owner,
+                json={"value": "The garden needs watering every Tuesday morning."},
+            )
+            assert response.status_code == 201
+            note_ids = [response.json()["id"]]
+            for image, text in zip(photos, (caption, ""), strict=True):
+                response = client.post(
+                    "/api/photos",
+                    auth=owner,
+                    files={"photo": ("note.png", image, "image/png")},
+                    data={"caption": text},
+                    headers={"X-PKA-Upload": "1"},
+                )
+                assert response.status_code == 201, response.text
+                note_ids.append(response.json()["id"])
+
+            async with open_embedder() as embedder:
+                for _ in note_ids:
+                    assert await run_once(db, embedder, summarizer=summarizer)
+
+            async with connection(self.dsn) as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT status, summary, embedding_model AS model,
+                           public.vector_dims(embedding) AS dimensions,
+                           embedding <#> embedding AS neg_norm_squared
+                    FROM notes
+                    WHERE id = ANY($1::bigint[])
+                    ORDER BY id
+                    """,
+                    note_ids,
+                )
+            assert len(rows) == 3
+            assert all(row["status"] == "ready" for row in rows)
+            assert all(row["model"] == EMBEDDINGGEMMA_MODEL for row in rows)
+            assert all(row["dimensions"] == 768 for row in rows)
+            assert [row["neg_norm_squared"] for row in rows] == pytest.approx(
+                [-1.0, -1.0, -1.0], abs=1e-5
+            )
+            assert rows[0]["summary"]
+            assert rows[1]["summary"]
+            assert rows[2]["summary"] is None
+
+            for query, matching_id in zip(
+                ("a bright red square", "a green circle"), note_ids[1:], strict=True
+            ):
+                response = client.get(
+                    "/", auth=owner, params={"q": query, "mode": "semantic"}
+                )
+                assert response.status_code == 200, response.text
+                assert response.text.index(f'href="/notes/{matching_id}"') == min(
+                    response.text.index(f'href="/notes/{note_id}"')
+                    for note_id in note_ids
+                )
+                assert (
+                    client.get(
+                        f"/notes/{matching_id}/photo", auth=("2", "second")
+                    ).status_code
+                    == 404
+                )
+
+            assert (
+                client.get(f"/notes/{note_ids[2]}/photo", auth=owner).content
+                == photos[1]
             )

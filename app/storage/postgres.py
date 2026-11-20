@@ -33,8 +33,10 @@ class Postgres:
     ) -> int:
         return await self._pool.fetchval(
             """
-            INSERT INTO notes (owner_id, kind, value, telegram_message_id)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO notes (
+                owner_id, kind, value, telegram_message_id, image_data, image_media_type
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (owner_id, telegram_message_id)
             DO UPDATE SET telegram_message_id = EXCLUDED.telegram_message_id
             RETURNING id
@@ -43,6 +45,8 @@ class Postgres:
             note_input.kind,
             note_input.value,
             telegram_message_id,
+            note_input.image,
+            note_input.image_media_type,
         )
 
     async def list_notes(self, owner_id: str, query: str = "") -> list[Note]:
@@ -77,6 +81,18 @@ class Postgres:
         )
         return Note(**row) if row is not None else None
 
+    async def get_photo(self, owner_id: str, note_id: int) -> tuple[bytes, str] | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT image_data, image_media_type
+            FROM notes
+            WHERE owner_id = $1 AND id = $2 AND kind = 'image'
+            """,
+            owner_id,
+            note_id,
+        )
+        return (row["image_data"], row["image_media_type"]) if row is not None else None
+
     async def claim_job(self) -> Job | None:
         # Active workers renew this lease while local CPU/GPU inference runs.
         row = await self._pool.fetchrow(
@@ -92,7 +108,8 @@ class Postgres:
             SET status = 'processing', claim_token = $1, lease_until = now() + interval '4 minutes'
             FROM next_note
             WHERE notes.id = next_note.id
-            RETURNING notes.id, notes.kind, notes.value, notes.claim_token
+            RETURNING notes.id, notes.kind, notes.value, notes.claim_token,
+                      notes.image_data AS image
             """,
             uuid4(),
         )

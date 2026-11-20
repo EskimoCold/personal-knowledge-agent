@@ -1,9 +1,11 @@
 from contextlib import asynccontextmanager
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from app.intake import web
 
@@ -14,6 +16,7 @@ class TestWeb:
         self.db = SimpleNamespace(
             list_notes=AsyncMock(return_value=[]),
             get_note=AsyncMock(),
+            get_photo=AsyncMock(return_value=None),
             enqueue=AsyncMock(return_value=23),
             search_similar=AsyncMock(return_value=[]),
         )
@@ -102,6 +105,84 @@ class TestWeb:
             assert client.get("/?q=%00", auth=self.auth).status_code == 422
         self.db.enqueue.assert_not_awaited()
         self.db.list_notes.assert_not_awaited()
+
+    def test_photo_upload_validates_bytes_and_uses_authenticated_owner(self):
+        self.embedder = SimpleNamespace(supports_images=True)
+        output = BytesIO()
+        Image.new("RGB", (16, 16), "red").save(output, "PNG")
+        photo = output.getvalue()
+
+        with TestClient(web.app) as client:
+            assert 'name="photo"' in client.get("/", auth=self.auth).text
+            files = {"photo": ("note.png", photo, "application/octet-stream")}
+            assert client.post("/api/photos", files=files).status_code == 401
+            response = client.post(
+                "/api/photos",
+                auth=self.auth,
+                files=files,
+                data={"caption": "  Red  "},
+                headers={"X-PKA-Upload": "1"},
+            )
+            assert response.status_code == 201
+            assert response.json() == {"id": 23}
+            owner, note = self.db.enqueue.await_args.args
+            assert owner == "101"
+            assert (note.kind, note.value, note.image, note.image_media_type) == (
+                "image",
+                "Red",
+                photo,
+                "image/png",
+            )
+            response = client.post(
+                "/api/photos",
+                auth=self.auth,
+                files={"photo": ("fake.png", b"invalid", "image/png")},
+                headers={"X-PKA-Upload": "1"},
+            )
+            assert response.status_code == 422
+            self.db.enqueue.assert_awaited_once()
+
+    def test_incomplete_photo_upload_does_not_drop_the_caption(self):
+        self.embedder = SimpleNamespace(supports_images=True)
+        output = BytesIO()
+        Image.new("RGB", (16, 16)).save(output, "PNG")
+        with TestClient(web.app) as client:
+            request = client.build_request(
+                "POST",
+                "/api/photos",
+                files=[
+                    ("photo", ("note.png", output.getvalue(), "image/png")),
+                    ("caption", (None, "Incomplete caption.")),
+                ],
+            )
+            truncated = (
+                request.read().split(b"Incomplete caption.", 1)[0] + b"Incomplete"
+            )
+            response = client.post(
+                "/api/photos",
+                auth=self.auth,
+                content=truncated,
+                headers={
+                    "Content-Type": request.headers["content-type"],
+                    "X-PKA-Upload": "1",
+                },
+            )
+            assert response.status_code == 422
+            self.db.enqueue.assert_not_awaited()
+
+    def test_photo_response_uses_owner_and_disables_caching(self):
+        self.db.get_photo.side_effect = lambda owner, note_id: (
+            (b"photo", "image/jpeg") if (owner, note_id) == ("101", 23) else None
+        )
+        with TestClient(web.app) as client:
+            response = client.get("/notes/23/photo", auth=self.auth)
+            assert response.status_code == 200
+            assert response.content == b"photo"
+            assert response.headers["content-type"] == "image/jpeg"
+            assert response.headers["cache-control"] == "no-store"
+            assert (
+                client.get("/notes/23/photo", auth=("202", "second")).status_code == 404
+            )
 
     def test_semantic_search_embeds_query_and_scopes_owner(self):
         embedding = object()

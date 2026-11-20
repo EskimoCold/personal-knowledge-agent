@@ -1,5 +1,7 @@
 import json
 import os
+import sys
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -7,11 +9,79 @@ import httpx
 import pytest
 import structlog
 
+from app.notes.models import Embedding
+from app.processing import embedding_service
 from app.processing.embeddings import Embedder, EmbeddingError, open_embedder
 from app.processing.worker import run_once
 
 
+@pytest.mark.parametrize(
+    ("cuda_available", "cuda_oom", "expected_devices"),
+    [
+        (False, False, ["cpu"]),
+        (True, False, ["cuda"]),
+        (True, True, ["cuda", "cpu"]),
+    ],
+)
+async def test_model_uses_cuda_when_available(
+    monkeypatch, cuda_available, cuda_oom, expected_devices
+):
+    class OutOfMemoryError(RuntimeError):
+        pass
+
+    model = object()
+    loader = Mock(side_effect=[OutOfMemoryError(), model] if cuda_oom else [model])
+    empty_cache = Mock()
+    torch = SimpleNamespace(
+        cuda=SimpleNamespace(
+            is_available=lambda: cuda_available,
+            OutOfMemoryError=OutOfMemoryError,
+            empty_cache=empty_cache,
+        ),
+        set_num_threads=Mock(),
+        get_num_threads=lambda: 4,
+    )
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=loader),
+    )
+
+    async with embedding_service.lifespan(embedding_service.app) as state:
+        assert state["model"] is model
+        assert state["device"] == expected_devices[-1]
+
+    assert [call.kwargs["device"] for call in loader.call_args_list] == expected_devices
+    assert empty_cache.call_count == int(cuda_oom)
+
+
 class TestEmbedder:
+    async def test_local_endpoint_sends_photo_and_document_purpose(self):
+        def respond(request):
+            payload = json.loads(request.content)
+            assert payload["input"] == "Caption summary."
+            assert payload["image"] == "cGhvdG8="
+            assert payload["purpose"] == "document"
+            return httpx.Response(200, json={"data": [{"embedding": [1.0] * 768}]})
+
+        with patch.dict(
+            os.environ,
+            {"LOCAL_EMBEDDINGS_URL": "http://embed/v1/embeddings"},
+            clear=True,
+        ):
+            async with open_embedder() as embedder:
+                assert embedder.supports_images
+                assert embedder.client.timeout.read == 30
+                async with httpx.AsyncClient(
+                    transport=httpx.MockTransport(respond)
+                ) as client:
+                    result = await replace(embedder, client=client).embed(
+                        "Caption summary.", document=True, image=b"photo"
+                    )
+                    assert result.model == embedder.model
+                    assert len(result.values) == 768
+
     async def test_valid_embedding_is_normalized_and_tagged_with_model(self):
         def respond(request):
             assert request.method == "POST"
@@ -82,6 +152,44 @@ class TestEmbedder:
 
 
 class TestEmbeddingWorker:
+    @pytest.mark.parametrize("caption", ["", "Photo caption"])
+    @pytest.mark.parametrize("embedding_fails", [False, True])
+    async def test_photo_worker_uses_image_and_optional_summary(
+        self, caption, embedding_fails
+    ):
+        job = SimpleNamespace(id=1, kind="image", value=caption, image=b"photo")
+        db = SimpleNamespace(
+            claim_job=AsyncMock(return_value=job),
+            finish_job=AsyncMock(),
+            renew_job=AsyncMock(return_value=True),
+        )
+        summarizer = SimpleNamespace(summarize=Mock(return_value=("Summary.", [])))
+        vector = Embedding("test", [1.0])
+        embedder = SimpleNamespace(
+            embed=AsyncMock(
+                return_value=vector,
+                side_effect=EmbeddingError("Offline") if embedding_fails else None,
+            )
+        )
+
+        assert await run_once(db, embedder, summarizer=summarizer)
+
+        if caption:
+            summarizer.summarize.assert_called_once_with(caption)
+        else:
+            summarizer.summarize.assert_not_called()
+        embedder.embed.assert_awaited_once_with(
+            "Summary." if caption else "", document=True, image=b"photo"
+        )
+        finish = db.finish_job.await_args
+        if embedding_fails:
+            assert finish.args[1] is None
+            assert "Photo embedding" in finish.kwargs["error"]
+            assert finish.kwargs["embedding"] is None
+        else:
+            assert finish.args[1].summary == ("Summary." if caption else None)
+            assert finish.kwargs["embedding"] == vector
+
     async def test_embedder_failure_leaves_note_ready_for_keyword_search(self):
         job = SimpleNamespace(id=1, kind="text", value="Some private note")
         db = SimpleNamespace(
@@ -102,7 +210,7 @@ class TestEmbeddingWorker:
                 ),
             )
 
-        embedder.embed.assert_awaited_once_with(job.value)
+        embedder.embed.assert_awaited_once_with("A summary.", document=True)
         db.finish_job.assert_awaited_once()
         finish = db.finish_job.await_args
         assert finish.args[0] is job
