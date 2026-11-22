@@ -1,11 +1,13 @@
 from html import escape
+from math import isfinite
+from urllib.parse import quote, urlencode
 
 from fastapi.responses import HTMLResponse
 
 from app.notes.models import Note
 
 
-def page(title: str, content: str) -> HTMLResponse:
+def page(title: str, content: str, *, status_code: int = 200) -> HTMLResponse:
     return HTMLResponse(
         f"""<!doctype html>
 <html lang="en">
@@ -28,6 +30,7 @@ def page(title: str, content: str) -> HTMLResponse:
 <main>{content}</main>
 </body>
 </html>""",
+        status_code=status_code,
         headers={
             "Cache-Control": "no-store",
             "Referrer-Policy": "no-referrer",
@@ -37,7 +40,7 @@ def page(title: str, content: str) -> HTMLResponse:
 
 
 NOTE_FORM = """
-<form data-note-form method="post" action="/api/notes">
+<form data-note-form data-note-path="{root}/notes/" method="post" action="{root}/api/notes">
   <label for="value">Text note or link</label>
   <textarea id="value" name="value" rows="3" required></textarea>
   <button type="submit">Save note</button>
@@ -46,7 +49,7 @@ NOTE_FORM = """
 """
 
 PHOTO_FORM = """
-<form data-note-form method="post" action="/api/photos" enctype="multipart/form-data">
+<form data-note-form data-note-path="{root}/notes/" method="post" action="{root}/api/photos" enctype="multipart/form-data">
   <label for="photo">Photo (JPEG or PNG, up to 8 MiB)</label>
   <input id="photo" name="photo" type="file" accept="image/jpeg,image/png" required>
   <label for="caption">Caption (optional)</label>
@@ -76,7 +79,7 @@ NOTE_FORM_SCRIPT = """
           const message = typeof result.detail === "string" ? result.detail : "Invalid note.";
           throw new Error(message);
         }
-        window.location.assign("/notes/" + encodeURIComponent(result.id));
+        window.location.assign(form.dataset.notePath + encodeURIComponent(result.id));
       } catch (error) {
         status.textContent = error.message;
         button.disabled = false;
@@ -91,48 +94,72 @@ def render_home(
     notes: list[Note],
     q: str,
     *,
+    root_path: str,
+    result_limit: int,
     semantic_available: bool,
     semantic_selected: bool,
     photos_available: bool = False,
+    search_error: str | None = None,
 ) -> HTMLResponse:
+    root = quote(root_path.rstrip("/"))
     rows = []
+    score_scale = ""
     for note in notes:
         preview = note.summary or note.value or "Photo"
         if len(preview) > 160:
             preview = preview[:157] + "…"
+        metadata = escape(note.status)
+        distance = note.cosine_distance if semantic_selected else None
+        if distance is not None and isfinite(distance):
+            metadata += f" · Similarity {1 - distance:z.2f}"
+            score_scale = "<p>Similarity ranges from −1 to 1. Higher scores indicate closer matches.</p>"
         rows.append(
-            f'<article><a href="/notes/{note.id}">Note {note.id}</a> · {escape(note.status)}'
+            f'<article><a href="{root}/notes/{note.id}">Note {note.id}</a> · {metadata}'
             f'<p class="note-text">{escape(preview)}</p></article>'
         )
 
     results = "".join(rows) if rows else "<p>No notes found.</p>"
+    if search_error:
+        keyword_query = escape(urlencode({"q": q, "mode": "keyword"}))
+        results = (
+            f'<p role="alert">{escape(search_error)} '
+            f'<a href="{root}/?{keyword_query}">Try keyword search</a></p>'
+        )
     mode_control = ""
     if semantic_available:
         selected = " selected" if semantic_selected else ""
+        limits = "".join(
+            f'<option value="{value}"{" selected" if value == result_limit else ""}>{value}</option>'
+            for value in range(1, 51)
+        )
         mode_control = f"""
   <label for="mode">Search mode</label>
   <select id="mode" name="mode">
     <option value="keyword">Keyword</option>
     <option value="semantic"{selected}>Semantic</option>
-  </select>"""
+  </select>
+  <label for="k">Results (semantic search)</label>
+  <select id="k" name="k">{limits}</select>"""
     return page(
         "Notes",
         f"""<h1>Personal Knowledge Agent</h1>
 <p>Save sources with English summaries and topic tags.</p>
-{NOTE_FORM}
-{PHOTO_FORM if photos_available else ""}
+{NOTE_FORM.format(root=root)}
+{PHOTO_FORM.format(root=root) if photos_available else ""}
 {NOTE_FORM_SCRIPT}
-<form action="/" method="get">
+<form action="{root}/" method="get">
   <label for="q">Search notes</label>
   <input id="q" name="q" value="{escape(q)}" maxlength="200">{mode_control}
   <button type="submit">Search</button>
 </form>
 <h2>Notes</h2>
-{results}""",
+{score_scale}{results}""",
+        status_code=503 if search_error else 200,
     )
 
 
-def render_note(note: Note) -> HTMLResponse:
+def render_note(note: Note, *, root_path: str) -> HTMLResponse:
+    root = quote(root_path.rstrip("/"))
     note_id = note.id
     label = {"url": "Submitted link", "image": "Caption", "text": "Submitted text"}
     fields = (
@@ -148,15 +175,15 @@ def render_note(note: Note) -> HTMLResponse:
         if value
     )
     if note.status in {"queued", "processing"}:
-        sections += f'<p><a href="/notes/{note_id}">Refresh status</a></p>'
+        sections += f'<p><a href="{root}/notes/{note_id}">Refresh status</a></p>'
     image = (
-        f'<img src="/notes/{note_id}/photo" alt="Uploaded photo">'
+        f'<img src="{root}/notes/{note_id}/photo" alt="Uploaded photo">'
         if note.kind == "image"
         else ""
     )
     return page(
         f"Note {note_id}",
-        f"""<p><a href="/">All notes</a></p>
+        f"""<p><a href="{root}/">All notes</a></p>
 <h1>Note {note_id}</h1>
 <p>Status <strong>{escape(note.status)}</strong></p>
 {image}

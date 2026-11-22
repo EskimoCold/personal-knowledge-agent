@@ -170,19 +170,23 @@ class Postgres:
         )
         return note_id is not None
 
-    async def search_similar(self, owner_id: str, embedding: Embedding) -> list[Note]:
+    async def search_similar(
+        self, owner_id: str, embedding: Embedding, *, limit: int = 20
+    ) -> list[Note]:
         rows = await self._pool.fetch(
             """
-            SELECT id, kind, value, status, text, summary, tags, error
+            SELECT id, kind, value, status, text, summary, tags, error,
+                   embedding <=> $4::double precision[]::vector AS cosine_distance
             FROM notes
             WHERE owner_id = $1 AND status = 'ready'
               AND embedding_model = $2 AND public.vector_dims(embedding) = $3
-            ORDER BY embedding <=> $4::double precision[]::vector, id DESC
-            LIMIT 20
+            ORDER BY cosine_distance, id DESC
+            LIMIT $5
             """,
             owner_id,
             embedding.model,
             len(embedding.values),
             embedding.values,
+            limit,
         )
         return [Note(**row) for row in rows]

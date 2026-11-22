@@ -33,15 +33,70 @@ class TestBot:
 
     async def test_ignores_unapproved_senders_and_group_chats(self):
         db = Mock(enqueue=AsyncMock())
+        unapproved = message_update(10, sender_id=43)
+        group = message_update(11, chat_type="group")
+        unapproved["message"]["text"] = group["message"]["text"] = "/search firewall"
         with patch.object(telegram, "telegram_request") as request:
-            await telegram.handle_update(
-                Mock(), db, {42}, message_update(10, sender_id=43)
-            )
-            await telegram.handle_update(
-                Mock(), db, {42}, message_update(11, chat_type="group")
-            )
+            for update in (unapproved, group):
+                await telegram.handle_update(Mock(), db, {42}, update)
         db.enqueue.assert_not_called()
         request.assert_not_called()
+
+    async def test_search_replies_with_encoded_web_link(self, monkeypatch):
+        monkeypatch.setenv("PKA_WEB_URL", "https://notes.test/")
+        update = message_update(10)
+        update["message"]["text"] = "/search  сетевой экран? #a&k=50+  "
+        db = Mock(enqueue=AsyncMock())
+        with patch.object(telegram, "telegram_request") as request:
+            await telegram.handle_update(Mock(), db, {42}, update)
+
+        args, kwargs = request.call_args
+        assert args[1] == "sendMessage"
+        assert kwargs["chat_id"] == 42
+        url = httpx.URL(kwargs["text"].splitlines()[-1])
+        assert (url.scheme, url.host, url.path) == ("https", "notes.test", "/")
+        assert dict(url.params) == {"q": "сетевой экран? #a&k=50+", "mode": "semantic"}
+        assert kwargs["link_preview_options"] == {"is_disabled": True}
+        db.enqueue.assert_not_awaited()
+
+    @pytest.mark.parametrize("query", ("", "   ", "x" * 201, "firewall\0"))
+    async def test_search_with_invalid_query_shows_usage(self, monkeypatch, query):
+        monkeypatch.setenv("PKA_WEB_URL", "https://notes.test/")
+        update = message_update(10)
+        update["message"]["text"] = f"/search {query}"
+        db = Mock(enqueue=AsyncMock())
+        with patch.object(telegram, "telegram_request") as request:
+            await telegram.handle_update(Mock(), db, {42}, update)
+        assert "/search <query>" in request.call_args.kwargs["text"]
+        db.enqueue.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "web_url",
+        (
+            "",
+            "notes.test",
+            "https://user@notes.test",
+            "https://notes.test/?x=1",
+            "https://notes.test/#",
+            "https://notes.test:wrong",
+            "https://%xx",
+            "https://exa%2fmple.org",
+            "https://xn--a",
+            r"https://notes.test\archive",
+            r"https://notes.test/archive\notes",
+        ),
+    )
+    async def test_search_without_valid_web_url_reports_unavailable(
+        self, monkeypatch, web_url
+    ):
+        monkeypatch.setenv("PKA_WEB_URL", web_url)
+        update = message_update(10)
+        update["message"]["text"] = "/search firewall"
+        db = Mock(enqueue=AsyncMock())
+        with patch.object(telegram, "telegram_request") as request:
+            await telegram.handle_update(Mock(), db, {42}, update)
+        assert "unavailable" in request.call_args.kwargs["text"]
+        db.enqueue.assert_not_awaited()
 
     @pytest.mark.parametrize("value", ("", "-42", "invalid"))
     async def test_requires_explicit_allowlist_before_opening_client(self, value):

@@ -64,6 +64,7 @@ class Note:
     summary: str | None
     tags: list[str]
     error: str | None
+    cosine_distance: float | None = None
 
 
 @dataclass(frozen=True)
