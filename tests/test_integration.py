@@ -135,7 +135,7 @@ class TestPostgresIntegration:
                 assert response.status_code == 201
                 paths.append(f"/notes/{response.json()['id']}")
 
-            assert "queued" in client.get(paths[0], auth=owner).text
+            assert "<strong>Queued</strong>" in client.get(paths[0], auth=owner).text
             assert await self.run_job(db, fetcher=self.fetcher)
             assert await self.run_job(db, fetcher=self.fetcher)
             assert await self.run_job(db, fetcher=self.fetcher)
@@ -146,7 +146,7 @@ class TestPostgresIntegration:
             assert paths[0] not in client.get("/", auth=other, params=search).text
             assert client.get(paths[0], auth=other).status_code == 404
             assert "fresh vegetables" in client.get(paths[1], auth=owner).text
-            assert "failed" in client.get(paths[2], auth=owner).text
+            assert "<strong>Failed</strong>" in client.get(paths[2], auth=owner).text
 
     async def test_failed_and_pending_links_are_searchable_only_by_the_owner(self):
         db = await self.start_database()
@@ -397,15 +397,12 @@ class TestPostgresIntegration:
             }
             positions = [response.text.index(links[text]) for text in scores]
             assert positions == sorted(positions)
+            rows = response.text.split('<li class="note-row">')[1:]
             for text, score in scores.items():
-                article = response.text.split(links[text], 1)[1].split("</article>", 1)[
-                    0
-                ]
-                assert f"Similarity {score}<" in article
-            zero_article = response.text.split(links["Zero vector"], 1)[1].split(
-                "</article>", 1
-            )[0]
-            assert "Similarity" not in zero_article
+                row = next(row for row in rows if links[text] in row)
+                assert f"Similarity {score}<" in row
+            zero_row = next(row for row in rows if links["Zero vector"] in row)
+            assert "Similarity" not in zero_row
             for text in (
                 "Different model",
                 "Different dimensions",

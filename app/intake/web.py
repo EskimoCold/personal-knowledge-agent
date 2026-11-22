@@ -72,7 +72,7 @@ async def home(
     request: Request,
     owner_id: Owner,
     q: Annotated[str, Query(max_length=200)] = "",
-    mode: Literal["keyword", "semantic"] = "keyword",
+    mode: Literal["keyword", "semantic"] | None = None,
     k: str = "20",
 ) -> HTMLResponse:
     if "\0" in q:
@@ -109,7 +109,8 @@ async def home(
         root_path=request.scope.get("root_path", ""),
         result_limit=result_limit,
         semantic_available=embedder is not None,
-        semantic_selected=mode == "semantic",
+        semantic_selected=mode == "semantic"
+        or (mode is None and not query and embedder is not None),
         photos_available=getattr(embedder, "supports_images", False),
         search_error=search_error,
     )

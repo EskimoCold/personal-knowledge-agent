@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from app.intake import web
+from app.notes.models import Note
 
 
 class TestWeb:
@@ -187,6 +188,49 @@ class TestWeb:
                 client.get("/notes/23/photo", auth=("202", "second")).status_code == 404
             )
 
+    def test_notebook_defaults_to_meaning_without_running_a_search(self):
+        self.embedder = SimpleNamespace(embed=AsyncMock())
+
+        with TestClient(web.app) as client:
+            response = client.get("/", auth=self.auth)
+
+        assert response.status_code == 200
+        assert '<option value="semantic" selected>Meaning</option>' in response.text
+        assert '<option value="20" selected>20</option>' in response.text
+        self.embedder.embed.assert_not_awaited()
+        self.db.list_notes.assert_awaited_once_with("101", "")
+
+    def test_existing_search_url_without_a_mode_uses_keyword(self):
+        self.embedder = SimpleNamespace(embed=AsyncMock())
+
+        with TestClient(web.app) as client:
+            response = client.get("/", params={"q": "blue door"}, auth=self.auth)
+
+        assert response.status_code == 200
+        assert '<option value="keyword" selected>Keyword</option>' in response.text
+        self.embedder.embed.assert_not_awaited()
+        self.db.list_notes.assert_awaited_once_with("101", "blue door")
+
+    def test_meaning_search_marks_only_the_first_ranked_result(self):
+        self.embedder = SimpleNamespace(embed=AsyncMock(return_value=object()))
+        self.db.search_similar.return_value = [
+            Note(23, "image", "Blue door", "ready", None, None, [], None, 0.2),
+            Note(42, "text", "Door in the garden", "ready", None, None, [], None, 0.4),
+        ]
+
+        with TestClient(web.app) as client:
+            response = client.get(
+                "/", params={"q": "door", "mode": "semantic"}, auth=self.auth
+            )
+
+        assert response.status_code == 200
+        assert response.text.count("Top match") == 1
+        assert (
+            response.text.index("Top match")
+            < response.text.index('href="/notes/23"')
+            < response.text.index('href="/notes/42"')
+        )
+
     def test_semantic_search_embeds_query_and_scopes_owner(self):
         embedding = object()
         self.embedder = SimpleNamespace(embed=AsyncMock(return_value=embedding))
@@ -238,7 +282,7 @@ class TestWeb:
             assert results.status_code == 200
             assert f'href="{url_path}/notes/23"' in results.text
             assert "Similarity 0.81" in results.text
-            assert f'action="{url_path}/" method="get"' in results.text
+            assert f'action="{url_path}/#find" method="get"' in results.text
             assert f'action="{url_path}/api/notes"' in results.text
             assert f'action="{url_path}/api/photos"' in results.text
             assert f'data-note-path="{url_path}/notes/"' in results.text

@@ -1,0 +1,134 @@
+:root {
+  --paper: #fbf8ff;
+  --lavender: #efe6fb;
+  --ink: #30213e;
+  --muted: #62536e;
+  --accent: #6943a0;
+  --line: #ddcfe9;
+  --field-edge: #9279a7;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 1rem/1.5 system-ui, sans-serif;
+}
+
+a { color: var(--accent); text-underline-offset: .18em; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+h1, h2, h3, p { margin: 0; }
+
+.site-header { border-bottom: 1px solid var(--line); }
+.site-header-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .25rem 1rem;
+  max-width: 62rem;
+  margin-inline: auto;
+  padding: .625rem 1rem;
+  font-size: .875rem;
+  font-weight: 650;
+}
+.site-header a { display: inline-flex; align-items: center; min-height: 2.75rem; }
+.brand { gap: .625rem; color: var(--ink); text-decoration: none; }
+.brand span {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: .65rem;
+  background: var(--accent);
+  color: white;
+  font-size: 1.25rem;
+}
+
+.notebook { max-width: 48rem; margin-inline: auto; padding: clamp(1rem, 4vw, 2.5rem) 1rem 3rem; }
+.composer { padding: clamp(1rem, 4vw, 2rem); border-radius: 1.25rem; background: var(--lavender); }
+h1 { font: 600 clamp(2rem, 5vw, 3rem)/1.05 Georgia, serif; letter-spacing: -.04em; }
+h2 { font-size: 1.25rem; line-height: 1.25; }
+h3 { font-size: .9375rem; }
+.intro { margin-block: .625rem 1rem; max-width: 53ch; color: var(--muted); }
+
+label { display: block; font-size: .875rem; font-weight: 650; }
+button, select, input, textarea { font: inherit; color: inherit; }
+input, textarea, select {
+  min-width: 0;
+  padding: .625rem .75rem;
+  border: 1px solid var(--field-edge);
+  border-radius: .625rem;
+  background: #fefcff;
+}
+input, textarea { width: 100%; }
+input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
+textarea { display: block; margin-top: .25rem; resize: vertical; }
+button {
+  padding: .625rem .875rem;
+  border: 1px solid var(--accent);
+  border-radius: .625rem;
+  background: var(--accent);
+  color: white;
+  font-size: .875rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+button:disabled { opacity: .65; cursor: wait; }
+.input-switcher, .form-actions, .search-options { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem .75rem; }
+.input-switcher { margin-bottom: .75rem; }
+.input-switcher button[aria-pressed="false"] { color: var(--accent); background: #fefcff; }
+.form-actions { margin-top: .75rem; }
+.form-actions [role="status"] { color: var(--muted); font-size: .875rem; }
+.photo-picker { padding: .75rem; margin-block: 0 .75rem; border: 1px dashed var(--accent); border-radius: .75rem; }
+.photo-picker input { margin-block: .25rem; padding: .375rem; font-size: .875rem; }
+.photo-picker input::file-selector-button {
+  margin-inline-end: .375rem;
+  padding: .375rem .5rem;
+  border: 1px solid var(--accent);
+  border-radius: .5rem;
+  background: var(--lavender);
+  color: var(--accent);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.photo-picker input::file-selector-button:hover { background: var(--line); }
+.hint, .note-meta { color: var(--muted); font-size: .875rem; }
+
+.search { margin-top: 1.5rem; }
+.search form { margin-top: .75rem; }
+.search-row { display: flex; gap: .5rem; margin-top: .25rem; }
+.search-row input { flex: 1; }
+.search-options { margin-top: .5rem; }
+.search-options select { margin-left: .25rem; padding: .375rem .5rem; font-size: 1rem; }
+.search h3 { margin-block: 1.25rem .375rem; }
+.search-error {
+  padding: .75rem;
+  border-left: .2rem solid var(--accent);
+  background: var(--lavender);
+}
+.note-list { list-style: none; margin: 0; padding: 0; }
+.note-row { border-top: 1px solid var(--line); padding: .625rem 0; }
+.note-row a { color: var(--ink); font-weight: 600; }
+.note-meta { margin-block: .125rem; }
+.top-match {
+  display: inline-block;
+  padding: .1rem .5rem;
+  border-radius: 1rem;
+  background: var(--lavender);
+  color: var(--accent);
+  font-weight: 700;
+}
+.note-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.detail h1 { margin-bottom: .5rem; }
+.detail h2 { margin-block: 1.25rem .25rem; }
+.detail img { display: block; max-width: 100%; height: auto; border-radius: .75rem; margin-top: 1rem; }
+
+@media (pointer: coarse) {
+  button, input, select { min-height: 2.75rem; }
+}
