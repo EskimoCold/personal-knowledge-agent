@@ -1,10 +1,14 @@
 from html import escape
 from math import isfinite
+from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from fastapi.responses import HTMLResponse
 
 from app.notes.models import Note
+
+NOTEBOOK_STYLE = Path(__file__).with_name("notebook.css").read_text(encoding="utf-8")
+NOTE_TYPES = {"text": "Text", "url": "Link", "image": "Photo"}
 
 
 def page(title: str, content: str, *, status_code: int = 200) -> HTMLResponse:
@@ -15,19 +19,10 @@ def page(title: str, content: str, *, status_code: int = 200) -> HTMLResponse:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{escape(title)} · Personal Knowledge Agent</title>
-<style>
-  body {{ max-width: 44rem; margin: 2rem auto; padding: 0 1rem; font: 1rem/1.55 system-ui; }}
-  label {{ display: block; margin-bottom: .3rem; font-weight: 600; }}
-  textarea {{ display: block; width: 100%; box-sizing: border-box; margin-bottom: .5rem; }}
-  input, button, textarea {{ font: inherit; }}
-  img {{ display: block; max-width: 100%; height: auto; }}
-  article {{ border-top: 1px solid #888; padding: .7rem 0; }}
-  article p {{ margin: .3rem 0; }}
-  .note-text {{ white-space: pre-wrap; overflow-wrap: anywhere; }}
-</style>
+<style>{NOTEBOOK_STYLE}</style>
 </head>
 <body>
-<main>{content}</main>
+{content}
 </body>
 </html>""",
         status_code=status_code,
@@ -39,34 +34,75 @@ def page(title: str, content: str, *, status_code: int = 200) -> HTMLResponse:
     )
 
 
+HEADER = """
+<header class="site-header">
+  <div class="site-header-inner">
+    <a class="brand" href="{root}/"><span aria-hidden="true">✳</span> Personal Knowledge Agent</a>
+    {shortcut}
+  </div>
+</header>
+"""
+
+INPUT_SWITCHER = """
+<div class="input-switcher" role="group" aria-label="What to save" hidden>
+  <button type="button" aria-controls="text-form" aria-pressed="true">Text or link</button>
+  <button type="button" aria-controls="photo-form" aria-pressed="false">Photo</button>
+</div>
+"""
+
 NOTE_FORM = """
-<form data-note-form data-note-path="{root}/notes/" method="post" action="{root}/api/notes">
-  <label for="value">Text note or link</label>
-  <textarea id="value" name="value" rows="3" required></textarea>
-  <button type="submit">Save note</button>
-  <p role="status"></p>
+<form id="text-form" data-note-form data-note-path="{root}/notes/" method="post" action="{root}/api/notes">
+  <label for="value">Note or link</label>
+  <textarea id="value" name="value" rows="3"
+    placeholder="Write something or paste a link…" required></textarea>
+  <div class="form-actions">
+    <button type="submit">Save note</button>
+    <p role="status"></p>
+  </div>
 </form>
 """
 
 PHOTO_FORM = """
-<form data-note-form data-note-path="{root}/notes/" method="post" action="{root}/api/photos" enctype="multipart/form-data">
-  <label for="photo">Photo (JPEG or PNG, up to 8 MiB)</label>
-  <input id="photo" name="photo" type="file" accept="image/jpeg,image/png" required>
+<form id="photo-form" data-note-form data-note-path="{root}/notes/" method="post"
+  action="{root}/api/photos" enctype="multipart/form-data">
+  <div class="photo-picker">
+    <label for="photo">Choose a photo</label>
+    <input id="photo" name="photo" type="file" accept="image/jpeg,image/png" aria-describedby="photo-hint" required>
+    <p id="photo-hint" class="hint">JPEG or PNG · Up to 8 MiB and 16 megapixels</p>
+  </div>
   <label for="caption">Caption (optional)</label>
-  <textarea id="caption" name="caption" rows="2" maxlength="12000"></textarea>
-  <button type="submit">Save photo</button>
-  <p role="status"></p>
+  <textarea id="caption" name="caption" rows="2" maxlength="12000"
+    placeholder="Anything you want to remember about it?"></textarea>
+  <div class="form-actions">
+    <button type="submit">Save photo</button>
+    <p role="status"></p>
+  </div>
 </form>
 """
 
-NOTE_FORM_SCRIPT = """
+HOME_SCRIPT = """
 <script>
-  for (const form of document.querySelectorAll("[data-note-form]")) {
+  const forms = document.querySelectorAll("[data-note-form]");
+  const switcher = document.querySelector(".input-switcher");
+  const inputTypes = switcher?.querySelectorAll("button") ?? [];
+  if (switcher) {
+    for (const button of inputTypes) {
+      button.addEventListener("click", () => {
+        for (const choice of inputTypes) choice.setAttribute("aria-pressed", String(choice === button));
+        for (const form of forms) form.hidden = form.id !== button.getAttribute("aria-controls");
+      });
+    }
+    inputTypes[0].click();
+    switcher.hidden = false;
+  }
+
+  for (const form of forms) {
     const button = form.querySelector("button");
     const status = form.querySelector("[role=status]");
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       button.disabled = true;
+      for (const choice of inputTypes) choice.disabled = true;
       status.textContent = "Saving…";
       try {
         const data = new FormData(form);
@@ -74,17 +110,30 @@ NOTE_FORM_SCRIPT = """
         const headers = isPhoto ? { "X-PKA-Upload": "1" } : { "Content-Type": "application/json" };
         const body = isPhoto ? data : JSON.stringify({ value: data.get("value") });
         const response = await fetch(form.action, { method: "POST", headers, body });
-        const result = await response.json();
+        const result = await response.json().catch(() => null);
         if (!response.ok) {
-          const message = typeof result.detail === "string" ? result.detail : "Invalid note.";
-          throw new Error(message);
+          status.textContent = typeof result?.detail === "string" ? result.detail : "Couldn't save. Try again.";
+        } else if (result?.id) {
+          window.location.assign(form.dataset.notePath + encodeURIComponent(result.id));
+          return;
+        } else {
+          status.textContent = "Couldn't confirm the save. Check your recent notes.";
         }
-        window.location.assign(form.dataset.notePath + encodeURIComponent(result.id));
-      } catch (error) {
-        status.textContent = error.message;
-        button.disabled = false;
+      } catch {
+        status.textContent = "Connection interrupted. Check your recent notes before retrying.";
       }
+      button.disabled = false;
+      for (const choice of inputTypes) choice.disabled = false;
     });
+  }
+
+  const mode = document.getElementById("mode");
+  if (mode) {
+    const count = document.getElementById("result-count");
+    const updateCount = () => { count.hidden = mode.value !== "semantic"; };
+    mode.addEventListener("change", updateCount);
+    window.addEventListener("pageshow", updateCount);
+    updateCount();
   }
 </script>
 """
@@ -102,64 +151,99 @@ def render_home(
     search_error: str | None = None,
 ) -> HTMLResponse:
     root = quote(root_path.rstrip("/"))
+    searching = bool(q.strip())
+    ranked = searching and semantic_selected
     rows = []
     score_scale = ""
-    for note in notes:
+    for index, note in enumerate(notes):
         preview = note.summary or note.value or "Photo"
         if len(preview) > 160:
             preview = preview[:157] + "…"
-        metadata = escape(note.status)
-        distance = note.cosine_distance if semantic_selected else None
+        distance = note.cosine_distance if ranked else None
+        metadata = NOTE_TYPES[note.kind]
+        if note.status != "ready":
+            metadata += f" · {escape(note.status.capitalize())}"
+        top_match = ""
+        if ranked and index == 0:
+            top_match = '<span class="top-match">Top match</span> '
         if distance is not None and isfinite(distance):
             metadata += f" · Similarity {1 - distance:z.2f}"
-            score_scale = "<p>Similarity ranges from −1 to 1. Higher scores indicate closer matches.</p>"
+            score_scale = '<p class="hint">Similarity ranges from −1 to 1. Higher scores indicate closer matches.</p>'
         rows.append(
-            f'<article><a href="{root}/notes/{note.id}">Note {note.id}</a> · {metadata}'
-            f'<p class="note-text">{escape(preview)}</p></article>'
+            '<li class="note-row">'
+            f'<p class="note-meta">{top_match}{metadata}</p>'
+            f'<a class="note-text" href="{root}/notes/{note.id}">{escape(preview)}</a></li>'
         )
 
-    results = "".join(rows) if rows else "<p>No notes found.</p>"
+    title = "Search results" if searching else "Recent notes"
+    empty = (
+        "No matches. Try another description or keyword."
+        if searching
+        else "Your saved notes will appear here."
+    )
+    results = (
+        f'<ul class="note-list">{"".join(rows)}</ul>' if rows else f"<p>{empty}</p>"
+    )
     if search_error:
         keyword_query = escape(urlencode({"q": q, "mode": "keyword"}))
         results = (
-            f'<p role="alert">{escape(search_error)} '
-            f'<a href="{root}/?{keyword_query}">Try keyword search</a></p>'
+            f'<p class="search-error" role="alert">{escape(search_error)} '
+            f'<a href="{root}/?{keyword_query}#find">Try keyword search</a></p>'
         )
     mode_control = ""
     if semantic_available:
-        selected = " selected" if semantic_selected else ""
+        meaning = " selected" if semantic_selected else ""
+        keyword = "" if semantic_selected else " selected"
         limits = "".join(
             f'<option value="{value}"{" selected" if value == result_limit else ""}>{value}</option>'
             for value in range(1, 51)
         )
         mode_control = f"""
-  <label for="mode">Search mode</label>
-  <select id="mode" name="mode">
-    <option value="keyword">Keyword</option>
-    <option value="semantic"{selected}>Semantic</option>
-  </select>
-  <label for="k">Results (semantic search)</label>
-  <select id="k" name="k">{limits}</select>"""
+  <div class="search-options">
+    <label for="mode">Match by
+      <select id="mode" name="mode">
+        <option value="semantic"{meaning}>Meaning</option>
+        <option value="keyword"{keyword}>Keyword</option>
+      </select>
+    </label>
+    <label for="k" id="result-count">Results
+      <select id="k" name="k">{limits}</select>
+    </label>
+  </div>"""
+    header = HEADER.format(root=root, shortcut='<a href="#find">Find a note ↓</a>')
     return page(
         "Notes",
-        f"""<h1>Personal Knowledge Agent</h1>
-<p>Save sources with English summaries and topic tags.</p>
-{NOTE_FORM.format(root=root)}
-{PHOTO_FORM.format(root=root) if photos_available else ""}
-{NOTE_FORM_SCRIPT}
-<form action="{root}/" method="get">
-  <label for="q">Search notes</label>
-  <input id="q" name="q" value="{escape(q)}" maxlength="200">{mode_control}
-  <button type="submit">Search</button>
-</form>
-<h2>Notes</h2>
-{score_scale}{results}""",
+        f"""{header}
+<main class="notebook">
+  <section class="composer" aria-labelledby="keep">
+    <h1 id="keep">What do you want to keep?</h1>
+    <p class="intro">Write a note, paste a link{", or add a photo" if photos_available else ""}.
+      {"Find it later in your own words." if semantic_available else "Find it later by searching your notes."}</p>
+    {INPUT_SWITCHER if photos_available else ""}
+    {NOTE_FORM.format(root=root)}
+    {PHOTO_FORM.format(root=root) if photos_available else ""}
+  </section>
+  <section id="find" class="search" aria-labelledby="find-title">
+    <h2 id="find-title">Find a note</h2>
+    <form action="{root}/#find" method="get">
+      <label for="q">Search your notes</label>
+      <div class="search-row">
+        <input type="search" id="q" name="q" value="{escape(q)}" maxlength="200" placeholder="Try ‘a blue door’">
+        <button type="submit">Search</button>
+      </div>{mode_control}
+    </form>
+    <h3>{title}</h3>
+    {score_scale}{results}
+  </section>
+</main>
+{HOME_SCRIPT}""",
         status_code=503 if search_error else 200,
     )
 
 
 def render_note(note: Note, *, root_path: str) -> HTMLResponse:
     root = quote(root_path.rstrip("/"))
+    header = HEADER.format(root=root, shortcut=f'<a href="{root}/">All notes</a>')
     note_id = note.id
     label = {"url": "Submitted link", "image": "Caption", "text": "Submitted text"}
     fields = (
@@ -174,8 +258,11 @@ def render_note(note: Note, *, root_path: str) -> HTMLResponse:
         for label, value in fields
         if value
     )
-    if note.status in {"queued", "processing"}:
-        sections += f'<p><a href="{root}/notes/{note_id}">Refresh status</a></p>'
+    refresh = (
+        f' · <a href="{root}/notes/{note_id}">Refresh status</a>'
+        if note.status in {"queued", "processing"}
+        else ""
+    )
     image = (
         f'<img src="{root}/notes/{note_id}/photo" alt="Uploaded photo">'
         if note.kind == "image"
@@ -183,9 +270,11 @@ def render_note(note: Note, *, root_path: str) -> HTMLResponse:
     )
     return page(
         f"Note {note_id}",
-        f"""<p><a href="{root}/">All notes</a></p>
-<h1>Note {note_id}</h1>
-<p>Status <strong>{escape(note.status)}</strong></p>
-{image}
-{sections}""",
+        f"""{header}
+<main class="notebook detail">
+  <h1>Note {note_id}</h1>
+  <p class="note-meta">{NOTE_TYPES[note.kind]} · <strong>{escape(note.status.capitalize())}</strong>{refresh}</p>
+  {image}
+  {sections}
+</main>""",
     )
