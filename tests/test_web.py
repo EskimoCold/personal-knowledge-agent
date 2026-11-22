@@ -1,9 +1,12 @@
+import re
 from contextlib import asynccontextmanager
+from html import unescape
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -196,22 +199,132 @@ class TestWeb:
             assert '<option value="semantic" selected>' in response.text
 
         self.embedder.embed.assert_awaited_once_with("сетевой экран")
-        self.db.search_similar.assert_awaited_once_with("101", embedding)
+        self.db.search_similar.assert_awaited_once_with("101", embedding, limit=20)
         self.db.list_notes.assert_not_awaited()
 
-    def test_unavailable_embedder_does_not_prevent_keyword_search(self):
-        self.embedder = SimpleNamespace(
-            embed=AsyncMock(side_effect=web.EmbeddingError("internal provider error"))
+    @pytest.mark.parametrize(
+        ("mount_path", "url_path"),
+        (
+            ("/pka", "/pka"),
+            ("/team#1/pka", "/team%231/pka"),
+            ("/team?2/pka", "/team%3F2/pka"),
+        ),
+    )
+    def test_search_and_note_navigation_use_the_mount_path(self, mount_path, url_path):
+        note = SimpleNamespace(
+            id=23,
+            kind="image",
+            value="Reference photo",
+            status="queued",
+            summary=None,
+            tags=[],
+            error=None,
+            cosine_distance=0.186,
         )
+        self.embedder = SimpleNamespace(
+            embed=AsyncMock(return_value=object()), supports_images=True
+        )
+        self.db.search_similar.return_value = [note]
+        self.db.get_note.return_value = note
+        self.db.get_photo.return_value = (b"photo", "image/jpeg")
+        parent = FastAPI(lifespan=web.lifespan)
+        parent.mount(mount_path, web.app)
+        with TestClient(parent) as client:
+            results = client.get(
+                f"{url_path}/",
+                params={"q": "photo", "mode": "semantic"},
+                auth=self.auth,
+            )
+            assert results.status_code == 200
+            assert f'href="{url_path}/notes/23"' in results.text
+            assert "Similarity 0.81" in results.text
+            assert f'action="{url_path}/" method="get"' in results.text
+            assert f'action="{url_path}/api/notes"' in results.text
+            assert f'action="{url_path}/api/photos"' in results.text
+            assert f'data-note-path="{url_path}/notes/"' in results.text
 
+            detail = client.get(f"{url_path}/notes/23", auth=self.auth)
+            assert detail.status_code == 200
+            assert f'href="{url_path}/">All notes' in detail.text
+            assert f'href="{url_path}/notes/23">Refresh status' in detail.text
+            assert f'src="{url_path}/notes/23/photo"' in detail.text
+            assert (
+                client.get(f"{url_path}/notes/23/photo", auth=self.auth).content
+                == b"photo"
+            )
+
+    @pytest.mark.parametrize("limit", (1, 12, 50))
+    def test_semantic_search_honors_and_preserves_result_limit(self, limit):
+        embedding = object()
+        self.embedder = SimpleNamespace(embed=AsyncMock(return_value=embedding))
         with TestClient(web.app) as client:
             response = client.get(
-                "/", params={"q": "экран", "mode": "semantic"}, auth=self.auth
+                "/",
+                params={"q": "network", "mode": "semantic", "k": limit},
+                auth=self.auth,
+            )
+        assert response.status_code == 200
+        choices = re.search(
+            r'<select id="k" name="k">(.*?)</select>', response.text, re.S
+        )
+        assert choices is not None
+        assert re.findall(r'<option value="([^"]+)"', choices[1]) == [
+            str(value) for value in range(1, 51)
+        ]
+        assert f'<option value="{limit}" selected>' in choices[1]
+        self.db.search_similar.assert_awaited_once_with("101", embedding, limit=limit)
+
+    @pytest.mark.parametrize("limit", ("0", "51", "1.5", "many"))
+    def test_invalid_result_limit_is_rejected_before_embedding(self, limit):
+        self.embedder = SimpleNamespace(embed=AsyncMock())
+        with TestClient(web.app) as client:
+            response = client.get(
+                "/",
+                params={"q": "network", "mode": "semantic", "k": limit},
+                auth=self.auth,
+            )
+        assert response.status_code == 422
+        self.embedder.embed.assert_not_awaited()
+        self.db.search_similar.assert_not_awaited()
+
+    @pytest.mark.parametrize("limit", ("", "51", "1e1"))
+    def test_keyword_search_ignores_an_invalid_semantic_result_limit(self, limit):
+        self.embedder = SimpleNamespace(embed=AsyncMock())
+        with TestClient(web.app) as client:
+            response = client.get(
+                "/",
+                params={"q": "network", "mode": "keyword", "k": limit},
+                auth=self.auth,
+            )
+        assert response.status_code == 200
+        self.embedder.embed.assert_not_awaited()
+        self.db.list_notes.assert_awaited_once_with("101", "network")
+
+    @pytest.mark.parametrize("configured", (True, False))
+    def test_unavailable_semantic_search_links_to_keyword_results(self, configured):
+        if configured:
+            self.embedder = SimpleNamespace(
+                embed=AsyncMock(
+                    side_effect=web.EmbeddingError("internal provider error")
+                )
+            )
+
+        query = "экран & сеть"
+        parent = FastAPI(lifespan=web.lifespan)
+        parent.mount("/team#1/pka", web.app)
+        with TestClient(parent) as client:
+            response = client.get(
+                "/team%231/pka/",
+                params={"q": query, "mode": "semantic"},
+                auth=self.auth,
             )
             assert response.status_code == 503
+            assert response.headers["content-type"].startswith("text/html")
             assert "internal provider error" not in response.text
-            response = client.get("/", params={"q": "экран"}, auth=self.auth)
+            match = re.search(r'href="([^"]+)">Try keyword search</a>', response.text)
+            assert match is not None
+            response = client.get(unescape(match[1]), auth=self.auth)
             assert response.status_code == 200
 
         self.db.search_similar.assert_not_awaited()
-        self.db.list_notes.assert_awaited_once_with("101", "экран")
+        self.db.list_notes.assert_awaited_once_with("101", query)

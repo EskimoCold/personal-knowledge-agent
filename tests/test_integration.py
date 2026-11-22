@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -308,6 +309,8 @@ class TestPostgresIntegration:
             query: query_embedding,
             "Office firewall": query_embedding,
             "Garden tools": Embedding("test-model", [0.0, 1.0]),
+            "Opposite direction": Embedding("test-model", [-1.0, 0.0]),
+            "Zero vector": Embedding("test-model", [0.0, 0.0]),
             "Different model": Embedding("other-model", [1.0, 0.0]),
             "Different dimensions": Embedding("test-model", [1.0, 0.0, 0.0]),
             "Private firewall": query_embedding,
@@ -323,6 +326,8 @@ class TestPostgresIntegration:
         for text in (
             "Office firewall",
             "Garden tools",
+            "Opposite direction",
+            "Zero vector",
             "Different model",
             "Different dimensions",
             "Private firewall",
@@ -348,6 +353,33 @@ class TestPostgresIntegration:
         async def configured_embedder():
             yield embedder
 
+        bot_replies = []
+
+        def respond(request):
+            bot_replies.append(json.loads(request.content)["text"])
+            return httpx.Response(200, json={"ok": True, "result": {}})
+
+        with patch.dict(os.environ, {"PKA_WEB_URL": "http://testserver/"}):
+            async with httpx.AsyncClient(
+                base_url="https://telegram.test",
+                transport=httpx.MockTransport(respond),
+            ) as bot:
+                await handle_update(
+                    bot,
+                    db,
+                    {1},
+                    {
+                        "message": {
+                            "message_id": 42,
+                            "chat": {"id": 1, "type": "private"},
+                            "from": {"id": 1},
+                            "text": f"/search {query}",
+                        }
+                    },
+                )
+        [bot_reply] = bot_replies
+        search_url = bot_reply.splitlines()[-1]
+
         with (
             patch.object(web, "open_embedder", configured_embedder),
             TestClient(web.app) as client,
@@ -358,9 +390,22 @@ class TestPostgresIntegration:
             search = {"q": query, "mode": "semantic"}
             response = client.get("/", auth=("1", "first"), params=search)
             assert response.status_code == 200
-            assert response.text.index(links["Office firewall"]) < response.text.index(
-                links["Garden tools"]
-            )
+            scores = {
+                "Office firewall": "1.00",
+                "Garden tools": "0.00",
+                "Opposite direction": "-1.00",
+            }
+            positions = [response.text.index(links[text]) for text in scores]
+            assert positions == sorted(positions)
+            for text, score in scores.items():
+                article = response.text.split(links[text], 1)[1].split("</article>", 1)[
+                    0
+                ]
+                assert f"Similarity {score}<" in article
+            zero_article = response.text.split(links["Zero vector"], 1)[1].split(
+                "</article>", 1
+            )[0]
+            assert "Similarity" not in zero_article
             for text in (
                 "Different model",
                 "Different dimensions",
@@ -368,6 +413,18 @@ class TestPostgresIntegration:
                 "Keyword-only note",
             ):
                 assert links[text] not in response.text
+
+            limited = client.get("/", auth=("1", "first"), params={**search, "k": 1})
+            assert limited.status_code == 200
+            assert links["Office firewall"] in limited.text
+            assert links["Garden tools"] not in limited.text
+
+            assert client.get(search_url).status_code == 401
+            bot_results = client.get(search_url, auth=("1", "first"))
+            assert bot_results.status_code == 200
+            assert links["Office firewall"] in bot_results.text
+            assert links["Private firewall"] not in bot_results.text
+            assert "Similarity 1.00" in bot_results.text
 
             private_results = client.get("/", auth=("2", "second"), params=search)
             assert links["Private firewall"] in private_results.text
@@ -377,6 +434,7 @@ class TestPostgresIntegration:
                 "/", auth=("1", "first"), params={"q": "Keyword-only"}
             )
             assert links["Keyword-only note"] in keyword_results.text
+            assert "Similarity" not in keyword_results.text
 
     async def test_concurrent_migrations_create_the_fresh_schema(self):
         await asyncio.gather(self.upgrade_database(), self.upgrade_database())

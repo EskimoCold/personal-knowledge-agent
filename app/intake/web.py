@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from python_multipart.exceptions import MultipartParseError
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
@@ -64,6 +64,7 @@ async def require_owner(
 
 
 Owner = Annotated[str, Depends(require_owner)]
+search_limit = TypeAdapter(Annotated[int, Field(ge=1, le=50)])
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -72,30 +73,45 @@ async def home(
     owner_id: Owner,
     q: Annotated[str, Query(max_length=200)] = "",
     mode: Literal["keyword", "semantic"] = "keyword",
+    k: str = "20",
 ) -> HTMLResponse:
     if "\0" in q:
         raise HTTPException(422, "Search terms cannot contain NUL bytes.")
 
+    try:
+        result_limit = search_limit.validate_python(k)
+    except ValidationError:
+        if mode == "semantic":
+            raise HTTPException(422, "Choose a result count from 1 to 50.") from None
+        result_limit = 20
+
     query = q.strip()
     db = request.state.db
     embedder = request.state.embedder
+    search_error = None
+    notes = []
     if query and mode == "semantic":
         if embedder is None:
-            raise HTTPException(503, "Semantic search is not configured.")
-        try:
-            embedding = await embedder.embed(query)
-        except EmbeddingError as exc:
-            raise HTTPException(503, "Semantic search is unavailable.") from exc
-        notes = await db.search_similar(owner_id, embedding)
+            search_error = "Semantic search is not configured."
+        else:
+            try:
+                embedding = await embedder.embed(query)
+            except EmbeddingError:
+                search_error = "Semantic search is unavailable."
+            else:
+                notes = await db.search_similar(owner_id, embedding, limit=result_limit)
     else:
         notes = await db.list_notes(owner_id, query)
 
     return render_home(
         notes,
         q,
+        root_path=request.scope.get("root_path", ""),
+        result_limit=result_limit,
         semantic_available=embedder is not None,
         semantic_selected=mode == "semantic",
         photos_available=getattr(embedder, "supports_images", False),
+        search_error=search_error,
     )
 
 
@@ -108,7 +124,7 @@ async def detail(
     note = await request.state.db.get_note(owner_id, note_id)
     if note is None:
         raise HTTPException(404, "Note not found")
-    return render_note(note)
+    return render_note(note, root_path=request.scope.get("root_path", ""))
 
 
 @app.get("/notes/{note_id}/photo")

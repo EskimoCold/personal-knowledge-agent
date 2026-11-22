@@ -103,6 +103,7 @@ services:
       <<: *database-env
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_ALLOWED_USER_IDS: ${TELEGRAM_ALLOWED_USER_IDS:-}
+      PKA_WEB_URL: ${PKA_WEB_URL:-}
     healthcheck:
       test: ["CMD", "python", "-c", "from app.intake.telegram import healthcheck; raise SystemExit(healthcheck())"]
       interval: 15s

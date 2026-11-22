@@ -12,7 +12,9 @@ from app.notes.models import NoteInput
 from app.storage.postgres import Postgres, open_postgres
 
 logger = logging.getLogger(__name__)
-HELP = "Send a text note or a standalone HTTP(S) link."
+HELP = (
+    "Send a text note or a standalone HTTP(S) link. Use /search <query> to find notes."
+)
 HEARTBEAT = Path("/tmp/pka-telegram-heartbeat")
 
 
@@ -55,6 +57,33 @@ async def telegram_request(
     return payload["result"]
 
 
+def search_reply(query: str) -> str:
+    if not query or len(query) > 200 or "\0" in query:
+        return "Use /search <query> with 1–200 characters."
+
+    base = os.getenv("PKA_WEB_URL", "").strip()
+    unavailable = "Web search is unavailable. Check PKA_WEB_URL."
+    try:
+        url = httpx.URL(base)
+        host = url.host
+    except (httpx.InvalidURL, UnicodeError):
+        return unavailable
+    if (
+        url.scheme not in {"https", "http"}
+        or not host
+        or "%" in host
+        or url.userinfo
+        or "?" in base
+        or "#" in base
+        or "\\" in base
+        or any(char.isspace() for char in base)
+        or (url.port is not None and not 1 <= url.port <= 65535)
+    ):
+        return unavailable
+    results = url.copy_merge_params({"q": query, "mode": "semantic"})
+    return f"Open search results:\n{results}"
+
+
 async def handle_update(
     client: httpx.AsyncClient,
     db: Postgres,
@@ -70,7 +99,12 @@ async def handle_update(
 
     text = message.get("text")
     reply = HELP
-    if text is not None and text != "/start":
+    reply_options = {}
+    search = (text or "").split(maxsplit=1)
+    if search and search[0] == "/search":
+        reply = search_reply(search[1].strip() if len(search) == 2 else "")
+        reply_options["link_preview_options"] = {"is_disabled": True}
+    elif text is not None and text != "/start":
         try:
             note_input = NoteInput.from_text(text)
         except ValueError:
@@ -83,7 +117,11 @@ async def handle_update(
 
     try:
         await telegram_request(
-            client, "sendMessage", chat_id=message["chat"]["id"], text=reply
+            client,
+            "sendMessage",
+            chat_id=message["chat"]["id"],
+            text=reply,
+            **reply_options,
         )
     except TelegramError:
         # A failed reply must not block later notes after handling the update.
