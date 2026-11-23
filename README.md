@@ -11,7 +11,9 @@ docker compose --profile embeddings up --build -d --wait embeddings
 docker compose --profile embeddings up --build -d
 ```
 
-The first command downloads the pinned EmbeddingGemma 2 weights into a persistent volume and waits for the model to load. Open the web app at `http://127.0.0.1:8000` to save a note or upload a JPEG or PNG up to 8 MiB and 16 megapixels. After the worker marks the note ready, use Semantic search to find it by meaning or visual details. Notes indexed with a different embedding model remain available through keyword search.
+The first command downloads the pinned EmbeddingGemma 2 weights into a persistent volume and waits for the model to load. Open the web app at `http://127.0.0.1:8000` to save a note or upload a JPEG or PNG up to 8 MiB and 16 megapixels. After the worker marks the note ready, choose **Meaning** search to find it by meaning or visual details. Notes indexed with a different embedding model remain available through keyword search.
+
+Meaning search retrieves a shortlist from Postgres. The worker's local Qwen model reranks up to 12 matches using their saved text and can answer a question with links to supporting notes. Photos without captions keep their vector ranking. When the model is busy or unavailable, search shows the original vector matches. The worker shares one loaded model with note summarization. Its HTTP endpoint is for trusted Compose services on the project network, and Compose leaves the worker port unpublished.
 
 ### NVIDIA GPU
 

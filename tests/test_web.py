@@ -12,6 +12,8 @@ from PIL import Image
 
 from app.intake import web
 from app.notes.models import Note
+from app.processing.search import MAX_SEARCH_CANDIDATES, MAX_SOURCE_CHARS, SearchResult
+from app.processing.search_client import SearchUnavailable
 
 
 class TestWeb:
@@ -25,6 +27,7 @@ class TestWeb:
             search_similar=AsyncMock(return_value=[]),
         )
         self.embedder = None
+        self.search_client = None
 
         @asynccontextmanager
         async def open_postgres():
@@ -34,8 +37,13 @@ class TestWeb:
         async def open_embedder():
             yield self.embedder
 
+        @asynccontextmanager
+        async def open_search_client():
+            yield self.search_client
+
         monkeypatch.setattr(web, "open_postgres", open_postgres)
         monkeypatch.setattr(web, "open_embedder", open_embedder)
+        monkeypatch.setattr(web, "open_search_client", open_search_client)
         monkeypatch.setenv("PKA_WEB_USERS", '{"101":"first","202":"second"}')
         self.auth = ("101", "first")
 
@@ -246,6 +254,142 @@ class TestWeb:
         self.db.search_similar.assert_awaited_once_with("101", embedding, limit=20)
         self.db.list_notes.assert_not_awaited()
 
+    def test_semantic_search_reranks_a_larger_pool_and_cites_owner_notes(self):
+        embedding = object()
+        self.embedder = SimpleNamespace(embed=AsyncMock(return_value=embedding))
+        self.search_client = SimpleNamespace(
+            search=AsyncMock(
+                return_value=SearchResult(
+                    ranked_ids=[42, 23],
+                    answer="The door was <blue>.",
+                    citations=[42, 23],
+                )
+            )
+        )
+        link = Note(
+            id=23,
+            kind="url",
+            value="https://example.com/article",
+            status="ready",
+            text="The door was photographed in April. " * 100,
+            summary="Background. " * 60,
+            tags=[],
+            error=None,
+            cosine_distance=0.1,
+        )
+        note = Note(42, "text", "The <blue> door", "ready", None, None, [], None, 0.3)
+        self.db.search_similar.return_value = [link, note]
+        self.db.get_note.side_effect = lambda owner_id, note_id: (
+            note if (owner_id, note_id) == ("101", 42) else None
+        )
+        parent = FastAPI(lifespan=web.lifespan)
+        parent.mount("/team#1/pka", web.app)
+
+        with TestClient(parent) as client:
+            response = client.get(
+                "/team%231/pka/",
+                params={"q": " What color was the door? ", "mode": "semantic", "k": 1},
+                auth=self.auth,
+            )
+            assert response.status_code == 200
+            assert response.headers["cache-control"] == "no-store"
+            assert "Answer from your notes" in response.text
+            assert "The door was &lt;blue&gt;." in response.text
+            assert "The door was <blue>." not in response.text
+            assert "The &lt;blue&gt; door" in response.text
+            assert "The <blue> door" not in response.text
+            answer, results = response.text.split("<h3>Search results</h3>")
+            assert 'href="/team%231/pka/notes/42"' in answer
+            assert 'href="/team%231/pka/notes/23"' in answer
+            assert 'href="/team%231/pka/notes/42"' in results
+            assert 'href="/team%231/pka/notes/23"' not in results
+            assert "Vector similarity 0.70" in results
+            assert "LLM reranks" in results
+
+            source_url = "/team%231/pka/notes/42"
+            assert client.get(source_url, auth=self.auth).status_code == 200
+            assert client.get(source_url, auth=("202", "second")).status_code == 404
+
+        self.db.search_similar.assert_awaited_once_with(
+            "101", embedding, limit=MAX_SEARCH_CANDIDATES
+        )
+        self.search_client.search.assert_awaited_once()
+        request = self.search_client.search.await_args.args[0]
+        assert request.query == "What color was the door?"
+        assert [candidate.id for candidate in request.candidates] == [23, 42]
+        assert len(request.candidates[0].text) == MAX_SOURCE_CHARS
+        assert link.value not in request.candidates[0].text
+        assert "The door was photographed in April." in request.candidates[0].text
+        assert request.candidates[1].text == note.value
+
+    def test_reranking_preserves_image_position_and_can_abstain(self):
+        self.embedder = SimpleNamespace(embed=AsyncMock(), supports_images=True)
+        self.search_client = SimpleNamespace(
+            search=AsyncMock(
+                return_value=SearchResult(
+                    ranked_ids=[31, 23], answer=None, citations=[]
+                )
+            )
+        )
+        self.db.search_similar.return_value = [
+            Note(23, "text", "First", "ready", None, None, [], None, 0.1),
+            Note(42, "image", "", "ready", None, None, [], None, 0.2),
+            Note(31, "text", "Third", "ready", None, None, [], None, 0.3),
+        ]
+
+        with TestClient(web.app) as client:
+            response = client.get(
+                "/",
+                params={"q": "When did I save the photo?", "mode": "semantic"},
+                auth=self.auth,
+            )
+
+        assert response.status_code == 200
+        assert "did not provide enough evidence" in response.text
+        assert "<h4>Sources</h4>" not in response.text
+        assert re.findall(r'href="/notes/(\d+)"', response.text) == ["31", "42", "23"]
+        request = self.search_client.search.await_args.args[0]
+        assert [candidate.id for candidate in request.candidates] == [23, 31]
+
+    def test_unavailable_llm_search_preserves_vector_results(self):
+        self.embedder = SimpleNamespace(embed=AsyncMock())
+        self.search_client = SimpleNamespace(
+            search=AsyncMock(side_effect=SearchUnavailable("private detail"))
+        )
+        self.db.search_similar.return_value = [
+            Note(23, "text", "First", "ready", None, None, [], None, 0.1),
+            Note(42, "text", "Second", "ready", None, None, [], None, 0.2),
+        ]
+
+        with TestClient(web.app) as client:
+            response = client.get(
+                "/",
+                params={"q": "first", "mode": "semantic", "k": 1},
+                auth=self.auth,
+            )
+
+        assert response.status_code == 200
+        assert "LLM search is unavailable. Showing vector matches." in response.text
+        assert "private detail" not in response.text
+        assert re.findall(r'href="/notes/(\d+)"', response.text) == ["23"]
+
+    def test_image_only_search_does_not_call_the_text_model(self):
+        self.embedder = SimpleNamespace(embed=AsyncMock(), supports_images=True)
+        self.search_client = SimpleNamespace(search=AsyncMock())
+        self.db.search_similar.return_value = [
+            Note(42, "image", "", "ready", None, None, [], None, 0.1),
+        ]
+
+        with TestClient(web.app) as client:
+            response = client.get(
+                "/", params={"q": "red circle", "mode": "semantic"}, auth=self.auth
+            )
+
+        assert response.status_code == 200
+        assert 'href="/notes/42"' in response.text
+        assert "Matching notes have no text to answer from." in response.text
+        self.search_client.search.assert_not_awaited()
+
     @pytest.mark.parametrize(
         ("mount_path", "url_path"),
         (
@@ -334,6 +478,7 @@ class TestWeb:
     @pytest.mark.parametrize("limit", ("", "51", "1e1"))
     def test_keyword_search_ignores_an_invalid_semantic_result_limit(self, limit):
         self.embedder = SimpleNamespace(embed=AsyncMock())
+        self.search_client = SimpleNamespace(search=AsyncMock())
         with TestClient(web.app) as client:
             response = client.get(
                 "/",
@@ -342,6 +487,7 @@ class TestWeb:
             )
         assert response.status_code == 200
         self.embedder.embed.assert_not_awaited()
+        self.search_client.search.assert_not_awaited()
         self.db.list_notes.assert_awaited_once_with("101", "network")
 
     @pytest.mark.parametrize("configured", (True, False))

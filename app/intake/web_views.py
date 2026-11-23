@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from html import escape
 from math import isfinite
 from pathlib import Path
@@ -9,6 +10,13 @@ from app.notes.models import Note
 
 NOTEBOOK_STYLE = Path(__file__).with_name("notebook.css").read_text(encoding="utf-8")
 NOTE_TYPES = {"text": "Text", "url": "Link", "image": "Photo"}
+
+
+@dataclass(frozen=True)
+class SearchExplanation:
+    text: str
+    sources: tuple[Note, ...] = ()
+    reranked: bool = False
 
 
 def page(title: str, content: str, *, status_code: int = 200) -> HTMLResponse:
@@ -139,6 +147,27 @@ HOME_SCRIPT = """
 """
 
 
+def note_preview(note: Note) -> str:
+    preview = note.summary or note.value or "Photo"
+    return preview if len(preview) <= 160 else preview[:157] + "…"
+
+
+def render_search_explanation(explanation: SearchExplanation, root: str) -> str:
+    sources = ""
+    if explanation.sources:
+        links = "".join(
+            f'<li><a href="{root}/notes/{note.id}">{escape(note_preview(note))}</a></li>'
+            for note in explanation.sources
+        )
+        sources = f"<h4>Sources</h4><ul>{links}</ul>"
+    return f"""
+    <section class="search-answer" aria-labelledby="answer-title">
+      <h3 id="answer-title">Answer from your notes</h3>
+      <p class="note-text">{escape(explanation.text)}</p>
+      {sources}
+    </section>"""
+
+
 def render_home(
     notes: list[Note],
     q: str,
@@ -149,16 +178,17 @@ def render_home(
     semantic_selected: bool,
     photos_available: bool = False,
     search_error: str | None = None,
+    explanation: SearchExplanation | None = None,
+    answers_available: bool = False,
 ) -> HTMLResponse:
     root = quote(root_path.rstrip("/"))
     searching = bool(q.strip())
     ranked = searching and semantic_selected
+    reranked = explanation is not None and explanation.reranked
     rows = []
-    score_scale = ""
+    ranking_hints = []
+    has_similarity = False
     for index, note in enumerate(notes):
-        preview = note.summary or note.value or "Photo"
-        if len(preview) > 160:
-            preview = preview[:157] + "…"
         distance = note.cosine_distance if ranked else None
         metadata = NOTE_TYPES[note.kind]
         if note.status != "ready":
@@ -167,14 +197,24 @@ def render_home(
         if ranked and index == 0:
             top_match = '<span class="top-match">Top match</span> '
         if distance is not None and isfinite(distance):
-            metadata += f" · Similarity {1 - distance:z.2f}"
-            score_scale = '<p class="hint">Similarity ranges from −1 to 1. Higher scores indicate closer matches.</p>'
+            score_label = "Vector similarity" if reranked else "Similarity"
+            metadata += f" · {score_label} {1 - distance:z.2f}"
+            has_similarity = True
         rows.append(
             '<li class="note-row">'
             f'<p class="note-meta">{top_match}{metadata}</p>'
-            f'<a class="note-text" href="{root}/notes/{note.id}">{escape(preview)}</a></li>'
+            f'<a class="note-text" href="{root}/notes/{note.id}">{escape(note_preview(note))}</a></li>'
         )
 
+    if reranked:
+        ranking_hints.append("The LLM reranks shortlisted notes with text.")
+    if has_similarity:
+        ranking_hints.append(
+            "Similarity ranges from −1 to 1. Higher scores indicate closer vector matches."
+        )
+    ranking_hint = (
+        f'<p class="hint">{" ".join(ranking_hints)}</p>' if ranking_hints else ""
+    )
     title = "Search results" if searching else "Recent notes"
     empty = (
         "No matches. Try another description or keyword."
@@ -210,6 +250,12 @@ def render_home(
       <select id="k" name="k">{limits}</select>
     </label>
   </div>"""
+    answer_panel = render_search_explanation(explanation, root) if explanation else ""
+    query_hint = (
+        "Try ‘What did I save about the blue door?’"
+        if answers_available
+        else "Try ‘a blue door’"
+    )
     header = HEADER.format(root=root, shortcut='<a href="#find">Find a note ↓</a>')
     return page(
         "Notes",
@@ -228,12 +274,13 @@ def render_home(
     <form action="{root}/#find" method="get">
       <label for="q">Search your notes</label>
       <div class="search-row">
-        <input type="search" id="q" name="q" value="{escape(q)}" maxlength="200" placeholder="Try ‘a blue door’">
+        <input type="search" id="q" name="q" value="{escape(q)}" maxlength="200" placeholder="{query_hint}">
         <button type="submit">Search</button>
       </div>{mode_control}
     </form>
+    {answer_panel}
     <h3>{title}</h3>
-    {score_scale}{results}
+    {ranking_hint}{results}
   </section>
 </main>
 {HOME_SCRIPT}""",
