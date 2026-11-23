@@ -20,17 +20,10 @@ from app.intake.web_views import SearchExplanation, render_home, render_note
 from app.notes.images import MAX_IMAGE_BYTES, decode_photo
 from app.notes.models import Note, NoteInput
 from app.processing.embeddings import EmbeddingError, open_embedder
-from app.processing.search import (
-    MAX_SEARCH_CANDIDATES,
-    MAX_SOURCE_CHARS,
-    SearchCandidate,
-    SearchRequest,
-)
-from app.processing.search_client import (
-    SearchClient,
-    SearchUnavailable,
-    open_search_client,
-)
+from app.processing.exceptions import SearchUnavailable
+from app.processing.search import SearchCandidate, SearchRequest
+from app.processing.search_client import SearchClient, open_search_client
+from app.processing.search_config import MAX_SEARCH_CANDIDATES, MAX_SOURCE_CHARS
 from app.storage.postgres import open_postgres
 
 

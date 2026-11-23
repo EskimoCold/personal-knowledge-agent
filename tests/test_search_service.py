@@ -9,10 +9,10 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.processing.exceptions import ProcessingError
-from app.processing.inference import InferenceBusy, LocalInference, run_native
+from app.processing.exceptions import InferenceBusy, ProcessingError, SearchUnavailable
+from app.processing.inference import LocalInference, run_native
 from app.processing.search import SearchRequest, SearchResult
-from app.processing.search_client import SearchClient, SearchUnavailable
+from app.processing.search_client import SearchClient
 from app.processing.search_service import create_search_app
 
 

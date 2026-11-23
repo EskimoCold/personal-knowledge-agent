@@ -6,12 +6,13 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.processing.exceptions import ProcessingError
+from app.processing.search_config import (
+    MAX_ANSWER_CHARS,
+    MAX_SEARCH_CANDIDATES,
+    MAX_SOURCE_CHARS,
+    MIN_SOURCE_CHARS,
+)
 from app.processing.summarizer import Summarizer
-
-MAX_SEARCH_CANDIDATES = 12
-MAX_SOURCE_CHARS = 800
-MAX_ANSWER_CHARS = 1000
-MIN_SOURCE_CHARS = 100
 
 logger = structlog.get_logger(__name__)
 NoteId = Annotated[int, Field(gt=0, le=2**63 - 1)]

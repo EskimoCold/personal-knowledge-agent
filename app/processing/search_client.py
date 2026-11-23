@@ -7,13 +7,9 @@ from dataclasses import dataclass
 import httpx
 from pydantic import ValidationError
 
+from app.processing.exceptions import SearchUnavailable
 from app.processing.search import SearchRequest, SearchResult
-
-SEARCH_TIMEOUT_SECONDS = 30.0
-
-
-class SearchUnavailable(Exception):
-    """Search inference failed without exposing request or provider details."""
+from app.processing.search_config import SEARCH_TIMEOUT_SECONDS
 
 
 @dataclass(frozen=True)

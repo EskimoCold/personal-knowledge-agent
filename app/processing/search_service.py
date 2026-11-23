@@ -6,10 +6,10 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import ValidationError
 from starlette.requests import ClientDisconnect
 
-from app.processing.exceptions import ProcessingError
-from app.processing.inference import InferenceBusy, run_native
+from app.processing.exceptions import InferenceBusy, ProcessingError
+from app.processing.inference import run_native
 from app.processing.search import SearchRequest, SearchResult
-from app.processing.search_client import SEARCH_TIMEOUT_SECONDS
+from app.processing.search_config import SEARCH_TIMEOUT_SECONDS
 
 MAX_REQUEST_BYTES = 64 * 1024
 

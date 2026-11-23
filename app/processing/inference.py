@@ -3,7 +3,7 @@ from collections.abc import Callable
 from threading import Event, Lock
 from typing import Protocol
 
-from app.processing.exceptions import ProcessingError
+from app.processing.exceptions import InferenceBusy, ProcessingError
 from app.processing.search import SearchRequest, SearchResult, search_notes
 from app.processing.summarizer import Summarizer
 
@@ -27,10 +27,6 @@ async def run_native[T](call: Callable[[], T], stop_event: Event | None = None) 
             except asyncio.CancelledError:
                 continue
         raise
-
-
-class InferenceBusy(Exception):
-    pass
 
 
 class LocalInference:

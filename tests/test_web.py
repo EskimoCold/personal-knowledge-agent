@@ -12,8 +12,9 @@ from PIL import Image
 
 from app.intake import web
 from app.notes.models import Note
-from app.processing.search import MAX_SEARCH_CANDIDATES, MAX_SOURCE_CHARS, SearchResult
-from app.processing.search_client import SearchUnavailable
+from app.processing.exceptions import SearchUnavailable
+from app.processing.search import SearchResult
+from app.processing.search_config import MAX_SEARCH_CANDIDATES, MAX_SOURCE_CHARS
 
 
 class TestWeb:
