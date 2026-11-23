@@ -106,6 +106,17 @@ button:disabled { opacity: .65; cursor: wait; }
 .search-options { margin-top: .5rem; }
 .search-options select { margin-left: .25rem; padding: .375rem .5rem; font-size: 1rem; }
 .search h3 { margin-block: 1.25rem .375rem; }
+.search-answer {
+  margin-top: 1rem;
+  padding: .875rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: .75rem;
+  background: var(--lavender);
+}
+.search-answer h3 { margin: 0 0 .375rem; }
+.search-answer h4 { margin: .75rem 0 .25rem; font-size: .875rem; }
+.search-answer ul { margin: 0; padding-inline-start: 1.25rem; }
+.search-answer li { overflow-wrap: anywhere; }
 .search-error {
   padding: .75rem;
   border-left: .2rem solid var(--accent);

@@ -1,8 +1,8 @@
-import asyncio
+from functools import partial
 
 from app.notes.models import NoteInput, ProcessedNote
 from app.processing.exceptions import ProcessingError
-from app.processing.summarizer import Summarizer
+from app.processing.inference import NoteSummarizer, run_native
 from app.processing.webpage.exceptions import PageError
 from app.processing.webpage.fetcher import PageFetcher
 
@@ -26,20 +26,10 @@ async def extract_text(note: NoteInput, fetcher: PageFetcher | None = None) -> s
 async def process(
     note: NoteInput,
     fetcher: PageFetcher | None = None,
-    summarizer: Summarizer | None = None,
+    summarizer: NoteSummarizer | None = None,
 ) -> ProcessedNote:
     text = await extract_text(note, fetcher)
     if summarizer is None:
         raise ProcessingError("Local summarizer is not configured.")
-    task = asyncio.create_task(asyncio.to_thread(summarizer.summarize, text))
-    try:
-        summary, tags = await asyncio.shield(task)
-    except asyncio.CancelledError:
-        drained = asyncio.gather(task, return_exceptions=True)
-        while not drained.done():
-            try:
-                await asyncio.shield(drained)
-            except asyncio.CancelledError:
-                continue
-        raise
+    summary, tags = await run_native(partial(summarizer.summarize, text))
     return ProcessedNote(text=text, summary=summary, tags=tags)

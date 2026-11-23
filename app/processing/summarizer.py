@@ -2,6 +2,7 @@ import json
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from threading import Event
 
 import structlog
 import yaml
@@ -37,15 +38,42 @@ class Summarizer:
             )
             rule = self.prompt["note_rule" if short_note else "article_rule"]
             content += self.prompt["final_task"].format(sentence_rule=rule)
+        return self.chat_tokens(self.prompt["system"], content)
+
+    def chat_tokens(self, system: str, content: str) -> list[int]:
         rendered = self.template.render(
             messages=[
-                {"role": "system", "content": self.prompt["system"]},
+                {"role": "system", "content": system},
                 {"role": "user", "content": content},
             ],
             add_generation_prompt=True,
             enable_thinking=False,
         )
         return self.model.tokenize(rendered.encode(), add_bos=False, special=True)
+
+    def complete(
+        self,
+        tokens: list[int],
+        grammar,
+        *,
+        attempt: int = 0,
+        stop_event: Event | None = None,
+    ):
+        options = {}
+        if stop_event is not None:
+            options["stopping_criteria"] = lambda _tokens, _scores: stop_event.is_set()
+        return self.model.create_completion(
+            prompt=tokens,
+            grammar=grammar,
+            max_tokens=self.config.max_tokens,
+            seed=self.config.seed + attempt,
+            temperature=self.config.temperature,
+            top_p=self.config.top_p,
+            top_k=self.config.top_k,
+            min_p=self.config.min_p,
+            stop=list(self.config.stop),
+            **options,
+        )
 
     def _fits(self, text: str, intermediate: bool = False) -> bool:
         return (
@@ -78,16 +106,8 @@ class Summarizer:
                 seed=self.config.seed + attempt,
             )
             try:
-                response = self.model.create_completion(
-                    prompt=tokens,
-                    grammar=self.grammars[intermediate],
-                    max_tokens=self.config.max_tokens,
-                    seed=self.config.seed + attempt,
-                    temperature=self.config.temperature,
-                    top_p=self.config.top_p,
-                    top_k=self.config.top_k,
-                    min_p=self.config.min_p,
-                    stop=list(self.config.stop),
+                response = self.complete(
+                    tokens, self.grammars[intermediate], attempt=attempt
                 )
             except Exception as exc:  # noqa: BLE001 - keep native error details out of saved notes.
                 log.error(

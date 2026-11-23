@@ -1,14 +1,19 @@
 import asyncio
+import os
 import time
+from contextlib import asynccontextmanager
 
 import structlog
+import uvicorn
 
 from app.logging import configure_logging
 from app.notes.models import Job, NoteInput, ProcessedNote
 from app.processing.embeddings import Embedder, EmbeddingError, open_embedder
 from app.processing.exceptions import ProcessingError
+from app.processing.inference import LocalInference, NoteSummarizer, run_native
 from app.processing.processor import extract_text, process
-from app.processing.summarizer import Summarizer, open_summarizer
+from app.processing.search_service import create_search_app
+from app.processing.summarizer import open_summarizer
 from app.processing.webpage.fetcher import PageFetcher
 from app.storage.postgres import Postgres, open_postgres
 
@@ -22,7 +27,7 @@ async def run_once(
     db: Postgres,
     embedder: Embedder | None = None,
     fetcher: PageFetcher | None = None,
-    summarizer: Summarizer | None = None,
+    summarizer: NoteSummarizer | None = None,
 ) -> bool:
     job = await db.claim_job()
     if job is None:
@@ -118,18 +123,71 @@ async def _process_job(db, job, embedder, fetcher, summarizer):
         return result, None, embedding
 
 
-async def main() -> None:
-    configure_logging()
+@asynccontextmanager
+async def open_worker():
     with open_summarizer() as summarizer:
         async with (
             open_embedder() as embedder,
             open_postgres() as db,
             PageFetcher.open() as fetcher,
         ):
-            logger.info("worker_started")
-            while True:
-                if not await run_once(db, embedder, fetcher, summarizer):
-                    await asyncio.sleep(1)
+            inference = LocalInference(summarizer)
+            try:
+                yield db, embedder, fetcher, inference
+            finally:
+                await run_native(inference.stop)
+
+
+async def poll(db, embedder, fetcher, inference: LocalInference) -> None:
+    logger.info("worker_started")
+    while True:
+        if not await run_once(db, embedder, fetcher, inference):
+            await asyncio.sleep(1)
+
+
+async def serve_search_and_poll(host: str) -> None:
+    failure = None
+
+    def polling_stopped(task: asyncio.Task) -> None:
+        nonlocal failure
+        if not task.cancelled():
+            failure = task.exception()
+            server.should_exit = True
+
+    @asynccontextmanager
+    async def lifespan(app):
+        async with open_worker() as (db, embedder, fetcher, inference):
+            polling = asyncio.create_task(poll(db, embedder, fetcher, inference))
+            polling.add_done_callback(polling_stopped)
+            try:
+                yield {"inference": inference}
+            finally:
+                polling.cancel()
+                await asyncio.gather(polling, return_exceptions=True)
+
+    server = uvicorn.Server(
+        uvicorn.Config(
+            create_search_app(lifespan),
+            host=host,
+            port=8000,
+            access_log=False,
+            limit_concurrency=8,
+            log_config=None,
+        )
+    )
+    await server.serve()
+    if failure is not None:
+        raise failure
+
+
+async def main() -> None:
+    configure_logging()
+    host = os.environ.get("SEARCH_INFERENCE_HOST", "").strip()
+    if host:
+        await serve_search_and_poll(host)
+    else:
+        async with open_worker() as resources:
+            await poll(*resources)
 
 
 if __name__ == "__main__":

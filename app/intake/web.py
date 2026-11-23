@@ -16,17 +16,25 @@ from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.requests import ClientDisconnect
 
-from app.intake.web_views import render_home, render_note
+from app.intake.web_views import SearchExplanation, render_home, render_note
 from app.notes.images import MAX_IMAGE_BYTES, decode_photo
-from app.notes.models import NoteInput
+from app.notes.models import Note, NoteInput
 from app.processing.embeddings import EmbeddingError, open_embedder
+from app.processing.exceptions import SearchUnavailable
+from app.processing.search import SearchCandidate, SearchRequest
+from app.processing.search_client import SearchClient, open_search_client
+from app.processing.search_config import MAX_SEARCH_CANDIDATES, MAX_SOURCE_CHARS
 from app.storage.postgres import open_postgres
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with open_postgres() as db, open_embedder() as embedder:
-        yield {"db": db, "embedder": embedder}
+    async with (
+        open_postgres() as db,
+        open_embedder() as embedder,
+        open_search_client() as search_client,
+    ):
+        yield {"db": db, "embedder": embedder, "search_client": search_client}
 
 
 app = FastAPI(
@@ -67,6 +75,64 @@ Owner = Annotated[str, Depends(require_owner)]
 search_limit = TypeAdapter(Annotated[int, Field(ge=1, le=50)])
 
 
+def search_evidence(note: Note) -> str:
+    source = (note.text or "").strip()
+    summary = (note.summary or "").strip()
+    if note.kind != "url":
+        source = source or note.value.strip()
+    else:
+        url = note.value.strip()
+        if source == url:
+            source = ""
+        if summary == url:
+            summary = ""
+
+    if not source or not summary or source == summary:
+        return (source or summary)[:MAX_SOURCE_CHARS]
+
+    if note.kind == "url":
+        first = summary[: MAX_SOURCE_CHARS // 3].rstrip()
+        remainder = source
+    else:
+        first = source[: MAX_SOURCE_CHARS * 2 // 3].rstrip()
+        remainder = summary
+    return f"{first}\n\n{remainder[: MAX_SOURCE_CHARS - len(first) - 2]}"
+
+
+async def enhance_semantic_results(
+    client: SearchClient, query: str, notes: list[Note]
+) -> tuple[list[Note], SearchExplanation]:
+    candidates = []
+    sources = {}
+    for note in notes[:MAX_SEARCH_CANDIDATES]:
+        evidence = search_evidence(note)
+        if evidence:
+            candidates.append(SearchCandidate(id=note.id, text=evidence))
+            sources[note.id] = note
+
+    if not candidates:
+        return notes, SearchExplanation("Matching notes have no text to answer from.")
+
+    try:
+        result = await client.search(SearchRequest(query=query, candidates=candidates))
+    except SearchUnavailable:
+        return notes, SearchExplanation(
+            "LLM search is unavailable. Showing vector matches."
+        )
+
+    ranked_ids = set(result.ranked_ids)
+    rank_order = iter(result.ranked_ids)
+    ordered = [
+        sources[next(rank_order)] if note.id in ranked_ids else note for note in notes
+    ]
+    return ordered, SearchExplanation(
+        result.answer
+        or "The matching notes did not provide enough evidence to answer.",
+        sources=tuple(sources[note_id] for note_id in result.citations),
+        reranked=bool(ranked_ids),
+    )
+
+
 @app.get("/", response_class=HTMLResponse)
 async def home(
     request: Request,
@@ -88,7 +154,9 @@ async def home(
     query = q.strip()
     db = request.state.db
     embedder = request.state.embedder
+    search_client = request.state.search_client
     search_error = None
+    explanation = None
     notes = []
     if query and mode == "semantic":
         if embedder is None:
@@ -99,7 +167,17 @@ async def home(
             except EmbeddingError:
                 search_error = "Semantic search is unavailable."
             else:
-                notes = await db.search_similar(owner_id, embedding, limit=result_limit)
+                pool_limit = (
+                    max(result_limit, MAX_SEARCH_CANDIDATES)
+                    if search_client is not None
+                    else result_limit
+                )
+                notes = await db.search_similar(owner_id, embedding, limit=pool_limit)
+                if search_client is not None and notes:
+                    notes, explanation = await enhance_semantic_results(
+                        search_client, query, notes
+                    )
+                notes = notes[:result_limit]
     else:
         notes = await db.list_notes(owner_id, query)
 
@@ -113,6 +191,8 @@ async def home(
         or (mode is None and not query and embedder is not None),
         photos_available=getattr(embedder, "supports_images", False),
         search_error=search_error,
+        explanation=explanation,
+        answers_available=search_client is not None and embedder is not None,
     )
 
 
